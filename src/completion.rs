@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use promkit_widgets::{
     core::{crossterm::event::Event, grapheme::StyledGraphemes, Widget},
     listbox::{self, Listbox},
+    serde_json,
 };
 use tokio::{
     sync::{mpsc, Mutex, RwLock},
@@ -15,7 +16,11 @@ use crate::{
     guide::{GuideAction, GuideMessage},
     json,
     query_editor::QueryEditorAction,
+    value_completion,
 };
+
+/// Maximum number of distinct values collected for value completion.
+const MAX_VALUE_SUGGESTIONS: usize = 10_000;
 
 /// Progress information for loading suggestions
 #[derive(Clone, Default)]
@@ -111,6 +116,27 @@ pub struct CompletionNavigator {
     search_result_chunk_size: usize,
     /// Buffered suggestions that are not yet visible in the listbox.
     remaining_items: Vec<String>,
+    /// Query text prepended to the selected item when replacing the query.
+    /// Empty for path suggestions (items are whole queries); for value
+    /// suggestions it holds the query up to the value (e.g. `select(.name == `).
+    item_prefix: String,
+    /// Parsed input JSON used to evaluate value suggestions.
+    /// `None` until the JSON viewer has finished loading the input.
+    source: Option<Arc<Vec<serde_json::Value>>>,
+}
+
+/// Outcome of starting a completion session.
+enum EnterOutcome {
+    Paths {
+        head: Option<String>,
+        progress: SuggestionLoadProgress,
+    },
+    Values {
+        head: Option<String>,
+        count: usize,
+        truncated: bool,
+    },
+    ValuesUnavailable(String),
 }
 
 impl CompletionNavigator {
@@ -124,12 +150,19 @@ impl CompletionNavigator {
             state,
             search_result_chunk_size,
             remaining_items: Default::default(),
+            item_prefix: Default::default(),
+            source: None,
         }
     }
 
-    /// Get the currently selected item in listbox.
+    /// Provide the parsed input JSON, enabling value suggestions.
+    pub fn set_source(&mut self, source: Arc<Vec<serde_json::Value>>) {
+        self.source = Some(source);
+    }
+
+    /// Get the query text corresponding to the currently selected item in listbox.
     fn get_current_item(&self) -> String {
-        self.state.listbox.get().to_string()
+        format!("{}{}", self.item_prefix, self.state.listbox.get())
     }
 
     /// Create graphemes for rendering the completion navigator.
@@ -198,16 +231,63 @@ impl CompletionNavigator {
         None
     }
 
-    async fn enter(&mut self, prefix: &str) -> (Option<String>, SuggestionLoadProgress) {
+    async fn enter(&mut self, prefix: &str) -> EnterOutcome {
+        if let Some(request) = value_completion::parse(prefix) {
+            return self.enter_values(request).await;
+        }
+
         let (items, progress) = self.shared_suggestions.collect_matches(prefix).await;
-        let head_item = self.initialize_session_items(items);
-        (head_item, progress)
+        let head = self.initialize_session_items(items, String::new());
+        EnterOutcome::Paths { head, progress }
+    }
+
+    /// Start a session suggesting the distinct values produced by the
+    /// left-hand side of the comparison being typed.
+    async fn enter_values(
+        &mut self,
+        request: value_completion::ValueCompletionRequest,
+    ) -> EnterOutcome {
+        self.clear_session_state();
+
+        let Some(source) = self.source.clone() else {
+            return EnterOutcome::ValuesUnavailable("input is still loading".to_string());
+        };
+
+        let query = request.source_query.clone();
+        let collected = task::spawn_blocking(move || {
+            json::collect_scalar_values(&query, &source, MAX_VALUE_SUGGESTIONS)
+        })
+        .await;
+
+        let values = match collected {
+            Ok(Ok(values)) => values,
+            Ok(Err(e)) => return EnterOutcome::ValuesUnavailable(e.to_string()),
+            Err(e) => return EnterOutcome::ValuesUnavailable(e.to_string()),
+        };
+        let truncated = values.len() >= MAX_VALUE_SUGGESTIONS;
+
+        let items = values
+            .into_iter()
+            .filter(|v| request.accepts(v))
+            .collect::<Vec<_>>();
+        let count = items.len();
+        let head = self.initialize_session_items(items, request.head);
+        EnterOutcome::Values {
+            head,
+            count,
+            truncated,
+        }
     }
 
     /// Initialize a completion session with a new search result set.
     /// This method always resets previous session state first.
-    fn initialize_session_items(&mut self, mut items: Vec<String>) -> Option<String> {
+    fn initialize_session_items(
+        &mut self,
+        mut items: Vec<String>,
+        item_prefix: String,
+    ) -> Option<String> {
         self.clear_session_state();
+        self.item_prefix = item_prefix;
 
         if items.is_empty() {
             return None;
@@ -218,7 +298,7 @@ impl CompletionNavigator {
             .collect::<Vec<_>>();
         self.remaining_items = items;
         self.state.listbox = Listbox::from(used);
-        Some(self.state.listbox.get().to_string())
+        Some(self.get_current_item())
     }
 
     /// Reset completion session state.
@@ -226,6 +306,7 @@ impl CompletionNavigator {
     fn clear_session_state(&mut self) {
         self.state.listbox = Listbox::from(Vec::<String>::new());
         self.remaining_items.clear();
+        self.item_prefix.clear();
     }
 }
 
@@ -257,23 +338,35 @@ pub fn start_completion_task(
                         let mut completion = shared_completion.write().await;
                         match action {
                             CompletionAction::Enter { prefix } => {
-                                let (head_item, load_progress) = completion.enter(&prefix).await;
+                                let (head_item, message) = match completion.enter(&prefix).await {
+                                    EnterOutcome::Paths { head, progress } => {
+                                        let message = if progress.is_complete {
+                                            GuideMessage::LoadedAllSuggestions(progress.loaded_path_count)
+                                        } else {
+                                            GuideMessage::LoadedPartiallySuggestions(progress.loaded_path_count)
+                                        };
+                                        (head, message)
+                                    }
+                                    EnterOutcome::Values { head, count, truncated } => {
+                                        (head, GuideMessage::LoadedValueSuggestions { count, truncated })
+                                    }
+                                    EnterOutcome::ValuesUnavailable(reason) => {
+                                        (None, GuideMessage::ValueSuggestionsUnavailable(reason))
+                                    }
+                                };
                                 match head_item {
                                     Some(head) => {
-                                        let message = if load_progress.is_complete {
-                                            GuideMessage::LoadedAllSuggestions(load_progress.loaded_path_count)
-                                        } else {
-                                            GuideMessage::LoadedPartiallySuggestions(load_progress.loaded_path_count)
-                                        };
                                         guide_action_tx.send(GuideAction::Show(message)).await?;
                                         query_editor_action_tx
                                             .send(QueryEditorAction::ReplaceText(head))
                                             .await?;
                                     }
                                     None => {
-                                        guide_action_tx
-                                            .send(GuideAction::Show(GuideMessage::NoSuggestionFound(prefix)))
-                                            .await?;
+                                        let message = match message {
+                                            GuideMessage::ValueSuggestionsUnavailable(_) => message,
+                                            _ => GuideMessage::NoSuggestionFound(prefix),
+                                        };
+                                        guide_action_tx.send(GuideAction::Show(message)).await?;
                                         shared_ctx.set_active_index(Index::QueryEditor).await;
                                         completion.clear_session_state();
                                     }

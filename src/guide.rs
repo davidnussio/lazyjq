@@ -18,7 +18,10 @@ pub enum GuideMessage {
     LoadedAllSuggestions(usize),
     LoadedPartiallySuggestions(usize),
     NoSuggestionFound(String),
+    LoadedValueSuggestions { count: usize, truncated: bool },
+    ValueSuggestionsUnavailable(String),
     JqReturnedNull(String),
+    JqReturnedEmpty(String),
     JqFailed(String),
 }
 
@@ -59,13 +62,32 @@ fn message_to_state(message: GuideMessage) -> status::State {
             format!("No suggestion found for '{prefix}'"),
             Severity::Warning,
         ),
-        GuideMessage::JqReturnedNull(input) => status::State::new(
-            format!("jq returned 'null', which may indicate a typo or incorrect filter: `{input}`"),
+        GuideMessage::LoadedValueSuggestions { count, truncated } => status::State::new(
+            if truncated {
+                format!("Loaded first {count} value suggestions")
+            } else {
+                format!("Loaded {count} value suggestions")
+            },
+            Severity::Success,
+        ),
+        GuideMessage::ValueSuggestionsUnavailable(reason) => status::State::new(
+            format!("Value suggestions unavailable: {reason}"),
             Severity::Warning,
         ),
-        GuideMessage::JqFailed(e) => {
-            status::State::new(format!("jq failed: `{e}`"), Severity::Error)
-        }
+        GuideMessage::JqReturnedNull(input) => status::State::new(
+            format!(
+                "jq returned 'null', which may indicate a typo or incorrect filter: `{input}` (showing last valid result)"
+            ),
+            Severity::Warning,
+        ),
+        GuideMessage::JqReturnedEmpty(input) => status::State::new(
+            format!("jq returned no results: `{input}`"),
+            Severity::Warning,
+        ),
+        GuideMessage::JqFailed(e) => status::State::new(
+            format!("jq failed (showing last valid result): `{e}`"),
+            Severity::Error,
+        ),
     }
 }
 

@@ -36,6 +36,7 @@ mod runtime_tasks;
 mod stdout_redirect;
 use stdout_redirect::StdoutRedirect;
 mod utils;
+mod value_completion;
 
 /// JSON navigator and interactive filter leveraging jq
 #[derive(Parser)]
@@ -355,6 +356,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Await JSON viewer bootstrap to complete, which will initialize the viewer with the input data and configuration.
     let shared_json_viewer = load_for_json_viewer.await?;
+    // Share the parsed input with the completion navigator to enable value suggestions.
+    {
+        let source = shared_json_viewer.lock().await.source();
+        shared_completion_navigator.write().await.set_source(source);
+    }
     // Spawn the JSON viewer processor task, which will handle updates to the JSON viewer based on user input and query changes.
     let json_viewer_task = json_viewer::start_viewer_task(
         json_viewer_action_rx,

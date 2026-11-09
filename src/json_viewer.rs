@@ -31,13 +31,18 @@ pub enum RenderTrigger {
 /// and handles user interactions and query processing.
 pub struct JsonViewer {
     state: jsonstream::State,
-    json: Vec<serde_json::Value>,
+    json: Arc<Vec<serde_json::Value>>,
     keybinds: JsonViewerKeybinds,
 }
 
 pub type SharedJsonViewer = Arc<Mutex<JsonViewer>>;
 
 impl JsonViewer {
+    /// Get the original (unfiltered) input JSON stream.
+    pub fn source(&self) -> Arc<Vec<serde_json::Value>> {
+        self.json.clone()
+    }
+
     /// Get the formatted content of current JSON stream.
     pub fn formatted_content(&self) -> String {
         self.state.config.format_raw_json(self.state.stream.rows())
@@ -45,6 +50,12 @@ impl JsonViewer {
 
     /// Handle user event and update the viewer state accordingly.
     fn handle_user_event(&mut self, event: &Event) {
+        // Navigation on an empty result (e.g. a `select` that matched nothing)
+        // is a no-op; the underlying rows would otherwise be indexed out of bounds.
+        if self.state.stream.rows().is_empty() {
+            return;
+        }
+
         match event {
             // Move up.
             event if self.keybinds.up.contains(event) => {
@@ -84,33 +95,33 @@ impl JsonViewer {
     }
 
     /// Process jq query and update the viewer state with the results.
+    ///
+    /// While a query is being typed it is often temporarily invalid
+    /// (e.g. an unterminated string in `select(.name == "Al`) or evaluates to `null`.
+    /// In those cases the last valid result (including cursor and fold state)
+    /// is kept on screen instead of falling back to the unfiltered input,
+    /// so the filtered data doesn't flicker away.
     async fn refresh_view_with_query(
         &mut self,
         area: (u16, u16),
         input: String,
     ) -> (Option<GuideMessage>, Option<StyledGraphemes>) {
-        match json::run_jaq(&input, &self.json) {
+        let guide = match json::run_jaq(&input, &self.json) {
+            Ok(ret) if ret.is_empty() => {
+                self.state.stream = JsonStream::new(ret.iter());
+                Some(GuideMessage::JqReturnedEmpty(input))
+            }
+            Ok(ret) if ret.iter().all(|val| *val == Value::Null) => {
+                Some(GuideMessage::JqReturnedNull(input))
+            }
             Ok(ret) => {
-                let mut guide = None;
-                if ret.iter().all(|val| *val == Value::Null) {
-                    guide = Some(GuideMessage::JqReturnedNull(input));
-
-                    self.state.stream = JsonStream::new(self.json.iter());
-                } else {
-                    self.state.stream = JsonStream::new(ret.iter());
-                }
-
-                (guide, Some(self.state.create_graphemes(area.0, area.1)))
+                self.state.stream = JsonStream::new(ret.iter());
+                None
             }
-            Err(e) => {
-                self.state.stream = JsonStream::new(self.json.iter());
+            Err(e) => Some(GuideMessage::JqFailed(e.to_string())),
+        };
 
-                (
-                    Some(GuideMessage::JqFailed(e.to_string())),
-                    Some(self.state.create_graphemes(area.0, area.1)),
-                )
-            }
-        }
+        (guide, Some(self.state.create_graphemes(area.0, area.1)))
     }
 }
 
@@ -157,7 +168,7 @@ pub async fn initialize(
     }
 
     Ok(Arc::new(Mutex::new(JsonViewer {
-        json: input_stream,
+        json: Arc::new(input_stream),
         state,
         keybinds,
     })))

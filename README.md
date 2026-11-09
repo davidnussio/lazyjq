@@ -40,6 +40,9 @@ and [jiq](https://github.com/fiatjaf/jiq).
     - [Identity](https://jqlang.github.io/jq/manual/#identity)
     - [Object Identifier-Index](https://jqlang.github.io/jq/manual/#object-identifier-index)
     - [Array Index](https://jqlang.github.io/jq/manual/#array-index)
+  - Value suggestions after a comparison or a string function, e.g.
+    `.users[] | select(.name == "Al` or `select(.email | endswith("` + <kbd>Tab</kbd>
+- Keeps the last valid result on screen while the filter is incomplete or invalid
 - Hint message to evaluate the filter
 
 ## Installation
