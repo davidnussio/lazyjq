@@ -16,7 +16,7 @@ use std::os::fd::OwnedFd;
 /// Redirects `stdout` to the controlling TTY while the TUI is running.
 ///
 /// This is needed when `--write-to-stdout` is used with piped stdout, e.g.
-/// `cat data.json | jnv --write-to-stdout | pbcopy`.
+/// `cat data.json | lazyjq --write-to-stdout | pbcopy`.
 /// During interactive rendering, cursor controls and screen output must go to
 /// a terminal, not to the downstream pipe.
 ///

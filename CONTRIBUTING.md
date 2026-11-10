@@ -1,19 +1,19 @@
-# Contributing to jnv
+# Contributing to lazyjq
 
-We welcome contributions to "jnv" and greatly appreciate your help in making
+We welcome contributions to "lazyjq" and greatly appreciate your help in making
 this project even better. Here's a quick guide to get you started.
 
 ## How to Contribute
 
 1. **Fork the Repository**: Click the "Fork" button at the top right of the
-[jnv repository](https://github.com/ynqa/jnv) to create a copy of the
+[lazyjq repository](https://github.com/davidnussio/lazyjq) to create a copy of the
 project in your GitHub account.
 
 2. **Clone the Repository**: On your local machine, open a terminal and run the
 following command, replacing `<your_username>` with your GitHub username:
 
 ```bash
-git clone https://github.com/<your_username>/jnv.git
+git clone https://github.com/<your_username>/lazyjq.git
 ```
 
 3. **Create a Branch**: Before making any changes, create a new branch for your
@@ -40,7 +40,7 @@ git push origin your-branch-name
 ```
 
 7. **Create a Pull Request (PR)**: Open the
-[jnv Pull Request page](https://github.com/ynqa/jnv/pulls) and click the
+[lazyjq Pull Request page](https://github.com/davidnussio/lazyjq/pulls) and click the
 "New Pull Request" button. Compare and create your PR by following the prompts.
 
 8. **Review and Discuss**: Your PR will be reviewed by project maintainers, who
@@ -56,4 +56,4 @@ Please adhere to our [Code of Conduct](CODE_OF_CONDUCT.md) when participating in
 this project. We aim to create a respectful and inclusive community for all
 contributors.
 
-Thank you for considering contributing to "jnv"!
+Thank you for considering contributing to "lazyjq"!

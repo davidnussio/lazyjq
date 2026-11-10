@@ -1,11 +1,12 @@
 use jaq_core::{
-    load::{Arena, File, Loader},
+    compile::Undefined,
+    load::{self, lex, Arena, File, Loader},
     Compiler, Ctx, RcIter,
 };
 use jaq_json::Val;
 use std::{collections::BTreeSet, rc::Rc};
 
-use promkit_widgets::serde_json::{self, Deserializer, Value};
+use serde_json::{Deserializer, Value};
 
 /// Deserialize JSON string into a vector of serde_json::Value.
 /// If max_streams is given, only deserialize up to that many JSON values.
@@ -67,7 +68,7 @@ pub fn run_jaq(
         for item in filter.run((Ctx::new([], &empty), input.clone())) {
             match item {
                 Ok(val) => ret.push(val.into()),
-                Err(err) => return Err(anyhow::anyhow!("jq filter execution failed: {err}")),
+                Err(err) => return Err(anyhow::anyhow!("{err}")),
             }
             outputs += 1;
             if outputs & 1023 == 0 && is_cancelled() {
@@ -118,12 +119,71 @@ fn compile(query: &str) -> anyhow::Result<jaq_core::Filter<jaq_core::Native<Val>
                 path: (),
             },
         )
-        .map_err(|errs| anyhow::anyhow!("jq filter parsing failed: {errs:?}"))?;
+        .map_err(|errs| anyhow::anyhow!(describe_load_errors(errs)))?;
     let filter = Compiler::default()
         .with_funs(jaq_std::funs().chain(jaq_json::funs()))
         .compile(modules)
-        .map_err(|errs| anyhow::anyhow!("jq filter compilation failed: {errs:?}"))?;
+        .map_err(|errs| anyhow::anyhow!(describe_compile_errors(errs)))?;
     Ok(filter)
+}
+
+/// Turn jaq's parse errors into a short, single-line, human readable message
+/// (e.g. "missing closing parenthesis", "expected term, found `)`").
+fn describe_load_errors(errs: load::Errors<&str, ()>) -> String {
+    let messages = errs
+        .into_iter()
+        .flat_map(|(_file, err)| match err {
+            load::Error::Io(errs) => errs
+                .into_iter()
+                .map(|(path, e)| format!("cannot load `{path}`: {e}"))
+                .collect::<Vec<_>>(),
+            load::Error::Lex(errs) => errs
+                .into_iter()
+                .map(|(expect, found)| {
+                    let what = match expect {
+                        lex::Expect::Delim("(") => return "missing closing parenthesis".into(),
+                        lex::Expect::Delim("[") => return "missing closing bracket".into(),
+                        lex::Expect::Delim("{") => return "missing closing brace".into(),
+                        lex::Expect::Delim("\"") => return "missing closing quote".into(),
+                        lex::Expect::Delim(_) => "closing delimiter",
+                        other => other.as_str(),
+                    };
+                    expected(what, found)
+                })
+                .collect(),
+            load::Error::Parse(errs) => errs
+                .into_iter()
+                .map(|(expect, found)| expected(expect.as_str(), found))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    format!("syntax error: {}", messages.join("; "))
+}
+
+fn describe_compile_errors(errs: jaq_core::compile::Errors<&str, ()>) -> String {
+    errs.into_iter()
+        .flat_map(|(_file, errs)| errs)
+        .map(|(name, undefined)| match undefined {
+            Undefined::Filter(arity) => format!("undefined filter `{name}/{arity}`"),
+            other => format!("undefined {} `{name}`", other.as_str()),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn expected(what: &str, found: &str) -> String {
+    let token: String = found
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(20)
+        .collect();
+    if token.is_empty() {
+        format!("expected {what} at end of filter")
+    } else {
+        format!("expected {what}, found `{token}`")
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +281,32 @@ mod tests {
         let stream = deserialize("[1,2,3] [4]", None).unwrap();
         assert_eq!(run_jaq(".", &vals(&stream), &|| true).unwrap(), None);
         assert_eq!(run(".[]", &stream).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn concise_error_messages() {
+        let err = |q: &str| run(q, &input()).unwrap_err().to_string();
+        assert_eq!(
+            err(".users[] | select(.name == "),
+            "syntax error: missing closing parenthesis"
+        );
+        assert_eq!(
+            err(".users[] |"),
+            "syntax error: expected term at end of filter"
+        );
+        assert_eq!(
+            err(".users[] | select(.name"),
+            "syntax error: missing closing parenthesis"
+        );
+        assert_eq!(
+            err(r#".name == "Al"#),
+            "syntax error: missing closing quote"
+        );
+        assert_eq!(
+            err(r#"select(.a == "A"Al)"#),
+            "syntax error: expected semicolon or right parenthesis, found `Al`"
+        );
+        assert_eq!(err(".users | foo"), "undefined filter `foo/0`");
+        assert!(!err(".users | foo").contains('\n'));
     }
 }

@@ -20,7 +20,7 @@ use std::{
 };
 
 use jaq_json::Val;
-use promkit_widgets::serde_json::Value;
+use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::json;

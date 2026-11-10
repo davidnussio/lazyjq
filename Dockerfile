@@ -1,13 +1,13 @@
 # Build stage
-FROM rust:1.86.0-slim-bookworm as builder
+FROM rust:1-slim-bookworm AS builder
 
-WORKDIR /jnv
-COPY . /jnv
+WORKDIR /lazyjq
+COPY . /lazyjq
 RUN cargo build --release
 
 # Final stage
 FROM debian:bookworm-slim
 
-COPY --from=builder /jnv/target/release/jnv /bin/jnv
+COPY --from=builder /lazyjq/target/release/lazyjq /bin/lazyjq
 
-ENTRYPOINT ["/bin/jnv"]
+ENTRYPOINT ["/bin/lazyjq"]
