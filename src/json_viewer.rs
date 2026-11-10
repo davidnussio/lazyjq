@@ -14,6 +14,7 @@ use crate::{
     config::{JsonConfig, JsonViewerKeybinds},
     context::{Index, SharedContext, State},
     guide::{self, GuideAction, GuideMessage},
+    jq_worker::JqWorker,
     json,
 };
 
@@ -24,7 +25,7 @@ pub enum RenderTrigger {
     /// Query changes such as new jq filter input
     QueryChanged { query: String },
     /// Terminal resize events
-    AreaResized { query: String },
+    AreaResized,
 }
 
 /// JSON viewer that maintains the state of JSON stream
@@ -32,15 +33,22 @@ pub enum RenderTrigger {
 pub struct JsonViewer {
     state: jsonstream::State,
     json: Arc<Vec<serde_json::Value>>,
+    /// Thread evaluating jq filters against the (pre-converted) input.
+    worker: JqWorker,
     keybinds: JsonViewerKeybinds,
 }
 
 pub type SharedJsonViewer = Arc<Mutex<JsonViewer>>;
 
 impl JsonViewer {
-    /// Get the original (unfiltered) input JSON stream.
-    pub fn source(&self) -> Arc<Vec<serde_json::Value>> {
+    /// Get the parsed (unfiltered) input.
+    pub fn input(&self) -> Arc<Vec<serde_json::Value>> {
         self.json.clone()
+    }
+
+    /// Get the handle to the jq evaluation thread.
+    pub fn worker(&self) -> JqWorker {
+        self.worker.clone()
     }
 
     /// Get the formatted content of current JSON stream.
@@ -94,34 +102,62 @@ impl JsonViewer {
         }
     }
 
-    /// Process jq query and update the viewer state with the results.
+    /// Apply the outcome of a query to the viewer state and return the guide message to show.
     ///
     /// While a query is being typed it is often temporarily invalid
     /// (e.g. an unterminated string in `select(.name == "Al`) or evaluates to `null`.
     /// In those cases the last valid result (including cursor and fold state)
     /// is kept on screen instead of falling back to the unfiltered input,
     /// so the filtered data doesn't flicker away.
-    async fn refresh_view_with_query(
-        &mut self,
-        area: (u16, u16),
-        input: String,
-    ) -> (Option<GuideMessage>, Option<StyledGraphemes>) {
-        let guide = match json::run_jaq(&input, &self.json) {
-            Ok(ret) if ret.is_empty() => {
-                self.state.stream = JsonStream::new(ret.iter());
-                Some(GuideMessage::JqReturnedEmpty(input))
-            }
-            Ok(ret) if ret.iter().all(|val| *val == Value::Null) => {
-                Some(GuideMessage::JqReturnedNull(input))
-            }
-            Ok(ret) => {
-                self.state.stream = JsonStream::new(ret.iter());
+    fn apply_result(&mut self, query: String, result: QueryResult) -> Option<GuideMessage> {
+        match result {
+            QueryResult::Stream(stream) => {
+                self.state.stream = stream;
                 None
             }
-            Err(e) => Some(GuideMessage::JqFailed(e.to_string())),
-        };
+            QueryResult::Empty(stream) => {
+                self.state.stream = stream;
+                Some(GuideMessage::JqReturnedEmpty(query))
+            }
+            QueryResult::AllNull => Some(GuideMessage::JqReturnedNull(query)),
+            QueryResult::Failed(e) => Some(GuideMessage::JqFailed(e)),
+        }
+    }
+}
 
-        (guide, Some(self.state.create_graphemes(area.0, area.1)))
+/// Outcome of evaluating a query, computed without holding the viewer lock.
+enum QueryResult {
+    Stream(JsonStream),
+    Empty(JsonStream),
+    AllNull,
+    Failed(String),
+}
+
+/// Whether the query is the identity filter, whose result is the input itself.
+fn is_identity(query: &str) -> bool {
+    matches!(query.trim(), "" | ".")
+}
+
+/// Evaluate the query and build the resulting stream.
+/// Returns `None` when the query was superseded by a newer one.
+async fn evaluate(source: Arc<Vec<Value>>, worker: JqWorker, query: &str) -> Option<QueryResult> {
+    // Building the rows for a large result is CPU heavy, keep it off the async workers.
+    let build_stream = |values: Arc<Vec<Value>>| async move {
+        tokio::task::spawn_blocking(move || JsonStream::new(values.iter()))
+            .await
+            .ok()
+    };
+
+    if is_identity(query) {
+        // Skip jq (and the conversions to and from its value type) entirely.
+        return build_stream(source).await.map(QueryResult::Stream);
+    }
+
+    match worker.run_filter(query.to_string()).await? {
+        Ok(ret) if ret.is_empty() => Some(QueryResult::Empty(JsonStream::new(ret.iter()))),
+        Ok(ret) if ret.iter().all(Value::is_null) => Some(QueryResult::AllNull),
+        Ok(ret) => build_stream(Arc::new(ret)).await.map(QueryResult::Stream),
+        Err(e) => Some(QueryResult::Failed(e.to_string())),
     }
 }
 
@@ -142,7 +178,8 @@ pub async fn initialize(
         ctx.state = State::Loading;
     }
 
-    let input_stream = json::deserialize(input, config.max_streams)?;
+    let input_stream = Arc::new(json::deserialize(input, config.max_streams)?);
+    let worker = JqWorker::spawn(input_stream.clone());
     let stream = JsonStream::new(input_stream.iter());
     let state = jsonstream::State {
         stream,
@@ -168,7 +205,8 @@ pub async fn initialize(
     }
 
     Ok(Arc::new(Mutex::new(JsonViewer {
-        json: Arc::new(input_stream),
+        json: input_stream,
+        worker,
         state,
         keybinds,
     })))
@@ -195,15 +233,18 @@ pub async fn render(
             )
             .await;
         }
-        RenderTrigger::AreaResized { query } => {
-            handle_area_resized(
-                shared_viewer_state,
-                shared_renderer,
-                shared_ctx,
-                guide_action_tx,
-                query,
-            )
-            .await;
+        RenderTrigger::AreaResized => {
+            // The query result does not depend on the terminal size:
+            // only the view needs to be laid out again.
+            let area = shared_ctx.area().await;
+            let graphemes = {
+                let viewer = shared_viewer_state.lock().await;
+                viewer.state.create_graphemes(area.0, area.1)
+            };
+            let _ = shared_renderer
+                .update([(Index::JsonViewer, graphemes)])
+                .render()
+                .await;
         }
     }
 }
@@ -264,38 +305,6 @@ async fn handle_query_changed(
     }
 }
 
-async fn handle_area_resized(
-    shared_viewer_state: SharedJsonViewer,
-    shared_renderer: SharedRenderer<Index>,
-    shared_ctx: SharedContext,
-    guide_action_tx: mpsc::Sender<GuideAction>,
-    query: String,
-) {
-    {
-        let mut ctx = shared_ctx.lock().await;
-        // Abort any ongoing processing task to prevent race conditions
-        // and ensure the new render reflects the latest terminal size.
-        if let Some(task) = ctx.current_task.take() {
-            task.abort();
-        }
-    }
-
-    let task = spawn_query_update_task(
-        shared_viewer_state.clone(),
-        shared_ctx.clone(),
-        guide_action_tx,
-        shared_renderer,
-        query,
-    );
-
-    // Store the new processing task handle in shared context
-    // to allow future cancellation if needed.
-    {
-        let mut ctx = shared_ctx.lock().await;
-        ctx.current_task = Some(task);
-    }
-}
-
 // Spawn a background task to process the jq query and update the viewer state with the results,
 // while managing the viewer state to prevent race conditions and ensure the view reflects the latest terminal size.
 fn spawn_query_update_task(
@@ -312,13 +321,21 @@ fn spawn_query_update_task(
             ctx.state = State::Processing;
         }
 
-        let (maybe_guide, maybe_resp) = {
-            let ctx = shared_ctx.lock().await;
-            let area = ctx.area;
-            drop(ctx);
+        let (source, worker) = {
+            let viewer = shared_viewer_state.lock().await;
+            (viewer.input(), viewer.worker())
+        };
 
-            let mut runtime = shared_viewer_state.lock().await;
-            runtime.refresh_view_with_query(area, query).await
+        // Superseded by a newer query: that one will update the view.
+        let Some(result) = evaluate(source, worker, &query).await else {
+            return;
+        };
+
+        let (maybe_guide, maybe_resp) = {
+            let area = shared_ctx.area().await;
+            let mut viewer = shared_viewer_state.lock().await;
+            let guide = viewer.apply_result(query, result);
+            (guide, Some(viewer.state.create_graphemes(area.0, area.1)))
         };
 
         // Set state to Idle to allow rendering of spinner frames in terminal.

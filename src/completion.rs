@@ -1,9 +1,10 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, ops::Bound, sync::Arc};
 
 use promkit_widgets::{
     core::{crossterm::event::Event, grapheme::StyledGraphemes, Widget},
+    jsonstream::jsonz,
     listbox::{self, Listbox},
-    serde_json,
+    serde_json::Value,
 };
 use tokio::{
     sync::{mpsc, Mutex, RwLock},
@@ -14,7 +15,7 @@ use crate::{
     config::CompletionKeybinds,
     context::{Index, SharedContext},
     guide::{GuideAction, GuideMessage},
-    json,
+    jq_worker::JqWorker,
     query_editor::QueryEditorAction,
     value_completion,
 };
@@ -43,67 +44,48 @@ impl SharedSuggestionStore {
     /// Collect suggestions that start with the given prefix
     pub async fn collect_matches(&self, prefix: &str) -> (Vec<String>, SuggestionLoadProgress) {
         let store = self.0.lock().await;
+        // Paths are sorted, so all matches form a contiguous range starting at `prefix`.
         let items = store
             .paths
-            .iter()
-            .filter(|p| p.starts_with(prefix))
+            .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
+            .take_while(|p| p.starts_with(prefix))
             .cloned()
             .collect::<Vec<_>>();
         (items, store.progress.clone())
     }
 }
 
-/// Spawn a background loader and return shared suggestion store with task handle.
-pub fn spawn_initialize(
-    input: &'static str,
-    max_streams: Option<usize>,
-    chunk_size: usize,
-) -> (SharedSuggestionStore, JoinHandle<()>) {
-    let shared = SharedSuggestionStore(Arc::new(Mutex::new(SuggestionStore {
-        paths: BTreeSet::new(),
-        progress: SuggestionLoadProgress::default(),
-    })));
+impl SharedSuggestionStore {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(SuggestionStore {
+            paths: BTreeSet::new(),
+            progress: SuggestionLoadProgress::default(),
+        })))
+    }
 
-    let shared_for_loading = shared.clone();
-    let loader_task = task::spawn(async move {
-        // Load paths in a streaming manner and update the shared store incrementally
-        let iter = match json::get_all_paths(input, max_streams).await {
-            Ok(iter) => iter,
-            Err(_) => {
-                let mut store = shared_for_loading.0.lock().await;
-                store.progress.is_complete = true;
-                return;
-            }
-        };
-
-        // Process paths in chunks to avoid holding the lock for too long
-        let mut batch = Vec::with_capacity(chunk_size);
-        for path in iter {
-            batch.push(path);
-
-            if batch.len() >= chunk_size {
-                let loaded = batch.len();
-                let mut store = shared_for_loading.0.lock().await;
-                for item in batch.drain(..) {
-                    store.paths.insert(item);
+    /// Spawn a background task extracting all paths from the already parsed input.
+    /// Paths are streamed into the store in chunks, so suggestions become
+    /// available (and the reported progress is accurate) while loading.
+    pub fn spawn_loader(&self, input: Arc<Vec<Value>>, chunk_size: usize) -> JoinHandle<()> {
+        let shared = self.clone();
+        task::spawn(async move {
+            let mut batch = Vec::with_capacity(chunk_size);
+            for path in jsonz::get_all_paths(input.iter()) {
+                batch.push(path);
+                if batch.len() >= chunk_size {
+                    shared.insert_batch(&mut batch, false).await;
                 }
-                store.progress.loaded_path_count += loaded;
             }
-        }
+            shared.insert_batch(&mut batch, true).await;
+        })
+    }
 
-        // Insert any remaining paths after the loop
-        let remaining = batch.len();
-        let mut store = shared_for_loading.0.lock().await;
-        for item in batch {
-            store.paths.insert(item);
-        }
-
-        // Mark loading as complete and update progress
-        store.progress.loaded_path_count += remaining;
-        store.progress.is_complete = true;
-    });
-
-    (shared, loader_task)
+    async fn insert_batch(&self, batch: &mut Vec<String>, is_complete: bool) {
+        let mut store = self.0.lock().await;
+        store.progress.loaded_path_count += batch.len();
+        store.paths.extend(batch.drain(..));
+        store.progress.is_complete = is_complete;
+    }
 }
 
 /// Navigator for managing the state of suggestions
@@ -120,9 +102,12 @@ pub struct CompletionNavigator {
     /// Empty for path suggestions (items are whole queries); for value
     /// suggestions it holds the query up to the value (e.g. `select(.name == `).
     item_prefix: String,
-    /// Parsed input JSON used to evaluate value suggestions.
+    /// jq evaluation thread used to compute value suggestions.
     /// `None` until the JSON viewer has finished loading the input.
-    source: Option<Arc<Vec<serde_json::Value>>>,
+    worker: Option<JqWorker>,
+    /// Value suggestions of the last session, keyed by the jq filter producing them,
+    /// so that refining the partial value (`"A` → `"Al`) doesn't re-run the filter.
+    value_cache: Option<(String, Arc<Vec<String>>)>,
 }
 
 /// Outcome of starting a completion session.
@@ -151,13 +136,14 @@ impl CompletionNavigator {
             search_result_chunk_size,
             remaining_items: Default::default(),
             item_prefix: Default::default(),
-            source: None,
+            worker: None,
+            value_cache: None,
         }
     }
 
-    /// Provide the parsed input JSON, enabling value suggestions.
-    pub fn set_source(&mut self, source: Arc<Vec<serde_json::Value>>) {
-        self.source = Some(source);
+    /// Provide the jq evaluation thread, enabling value suggestions.
+    pub fn set_worker(&mut self, worker: JqWorker) {
+        self.worker = Some(worker);
     }
 
     /// Get the query text corresponding to the currently selected item in listbox.
@@ -249,26 +235,31 @@ impl CompletionNavigator {
     ) -> EnterOutcome {
         self.clear_session_state();
 
-        let Some(source) = self.source.clone() else {
-            return EnterOutcome::ValuesUnavailable("input is still loading".to_string());
-        };
-
-        let query = request.source_query.clone();
-        let collected = task::spawn_blocking(move || {
-            json::collect_scalar_values(&query, &source, MAX_VALUE_SUGGESTIONS)
-        })
-        .await;
-
-        let values = match collected {
-            Ok(Ok(values)) => values,
-            Ok(Err(e)) => return EnterOutcome::ValuesUnavailable(e.to_string()),
-            Err(e) => return EnterOutcome::ValuesUnavailable(e.to_string()),
+        let values = match &self.value_cache {
+            Some((query, values)) if *query == request.source_query => values.clone(),
+            _ => {
+                let Some(worker) = &self.worker else {
+                    return EnterOutcome::ValuesUnavailable("input is still loading".to_string());
+                };
+                match worker
+                    .scalar_values(request.source_query.clone(), MAX_VALUE_SUGGESTIONS)
+                    .await
+                {
+                    Ok(values) => {
+                        let values = Arc::new(values);
+                        self.value_cache = Some((request.source_query.clone(), values.clone()));
+                        values
+                    }
+                    Err(e) => return EnterOutcome::ValuesUnavailable(e.to_string()),
+                }
+            }
         };
         let truncated = values.len() >= MAX_VALUE_SUGGESTIONS;
 
         let items = values
-            .into_iter()
+            .iter()
             .filter(|v| request.accepts(v))
+            .cloned()
             .collect::<Vec<_>>();
         let count = items.len();
         let head = self.initialize_session_items(items, request.head);

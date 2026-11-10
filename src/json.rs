@@ -3,22 +3,9 @@ use jaq_core::{
     Compiler, Ctx, RcIter,
 };
 use jaq_json::Val;
+use std::{collections::BTreeSet, rc::Rc};
 
-use promkit_widgets::{
-    jsonstream::jsonz,
-    serde_json::{self, Deserializer, Value},
-};
-
-/// Get all JSON paths from the input JSON string,
-/// respecting the max_streams limit if provided.
-pub async fn get_all_paths(
-    json_str: &str,
-    max_streams: Option<usize>,
-) -> anyhow::Result<impl Iterator<Item = String>> {
-    let stream = deserialize(json_str, max_streams)?;
-    let paths = jsonz::get_all_paths(stream.iter()).collect::<Vec<_>>();
-    Ok(paths.into_iter())
-}
+use promkit_widgets::serde_json::{self, Deserializer, Value};
 
 /// Deserialize JSON string into a vector of serde_json::Value.
 /// If max_streams is given, only deserialize up to that many JSON values.
@@ -35,48 +22,82 @@ pub fn deserialize(
     results.map_err(anyhow::Error::from)
 }
 
+/// Convert a `serde_json::Value` into jaq's value type without cloning it first.
+///
+/// Mirrors `impl From<serde_json::Value> for Val` from jaq-json (integers that fit
+/// into `isize` become `Int`, every other number keeps its textual form in `Num`),
+/// but avoids the intermediate deep clone and the per-number string round trip.
+pub fn to_val(value: &Value) -> Val {
+    match value {
+        Value::Null => Val::Null,
+        Value::Bool(b) => Val::Bool(*b),
+        Value::Number(n) => match n.as_i64().and_then(|i| isize::try_from(i).ok()) {
+            Some(i) => Val::Int(i),
+            None => Val::Num(Rc::new(n.to_string())),
+        },
+        Value::String(s) => Val::from(s.clone()),
+        Value::Array(a) => a.iter().map(to_val).collect(),
+        Value::Object(o) => Val::obj(
+            o.iter()
+                .map(|(k, v)| (Rc::new(k.clone()), to_val(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// Run `query` over `inputs`.
+///
+/// `is_cancelled` is polled between outputs; when it returns true the evaluation
+/// stops early and `Ok(None)` is returned.
 pub fn run_jaq(
     query: &str,
-    json_stream: &[serde_json::Value],
-) -> anyhow::Result<Vec<serde_json::Value>> {
+    inputs: &[Val],
+    is_cancelled: &dyn Fn() -> bool,
+) -> anyhow::Result<Option<Vec<Value>>> {
     let filter = compile(query)?;
-    let mut ret = Vec::<serde_json::Value>::new();
+    let mut ret = Vec::<Value>::new();
 
-    for input in json_stream {
-        let inputs = RcIter::new(core::iter::empty());
-        let out = filter.run((Ctx::new([], &inputs), Val::from(input.clone())));
-        for item in out {
+    let mut outputs = 0usize;
+
+    for input in inputs {
+        if is_cancelled() {
+            return Ok(None);
+        }
+        let empty = RcIter::new(core::iter::empty());
+        for item in filter.run((Ctx::new([], &empty), input.clone())) {
             match item {
                 Ok(val) => ret.push(val.into()),
                 Err(err) => return Err(anyhow::anyhow!("jq filter execution failed: {err}")),
             }
+            outputs += 1;
+            if outputs & 1023 == 0 && is_cancelled() {
+                return Ok(None);
+            }
         }
     }
 
-    Ok(ret)
+    Ok(Some(ret))
 }
 
-/// Run `query` over `json_stream` and collect the distinct scalar outputs
+/// Run `query` over `inputs` and collect the distinct scalar outputs
 /// (strings, numbers, booleans, null) encoded as JSON, sorted.
 /// Runtime errors are skipped so that heterogeneous inputs still yield values.
 /// Collection stops once `limit` distinct values have been found.
 pub fn collect_scalar_values(
     query: &str,
-    json_stream: &[serde_json::Value],
+    inputs: &[Val],
     limit: usize,
 ) -> anyhow::Result<Vec<String>> {
     let filter = compile(query)?;
-    let mut values = std::collections::BTreeSet::new();
+    let mut values = BTreeSet::new();
 
-    'outer: for input in json_stream {
-        let inputs = RcIter::new(core::iter::empty());
-        let out = filter.run((Ctx::new([], &inputs), Val::from(input.clone())));
-        for val in out.flatten() {
-            let val: serde_json::Value = val.into();
-            if val.is_array() || val.is_object() {
+    'outer: for input in inputs {
+        let empty = RcIter::new(core::iter::empty());
+        for val in filter.run((Ctx::new([], &empty), input.clone())).flatten() {
+            if matches!(val, Val::Arr(_) | Val::Obj(_)) {
                 continue;
             }
-            values.insert(val.to_string());
+            values.insert(Value::from(val).to_string());
             if values.len() >= limit {
                 break 'outer;
             }
@@ -122,9 +143,17 @@ mod tests {
         .unwrap()
     }
 
+    fn vals(stream: &[Value]) -> Vec<Val> {
+        stream.iter().map(to_val).collect()
+    }
+
+    fn run(query: &str, stream: &[Value]) -> anyhow::Result<Vec<Value>> {
+        run_jaq(query, &vals(stream), &|| false).map(Option::unwrap)
+    }
+
     fn values_for(query: &str) -> Vec<String> {
         let req = value_completion::parse(query).expect("value position");
-        collect_scalar_values(&req.source_query, &input(), 100)
+        collect_scalar_values(&req.source_query, &vals(&input()), 100)
             .unwrap()
             .into_iter()
             .filter(|v| req.accepts(v))
@@ -163,15 +192,34 @@ mod tests {
     fn errors_are_skipped() {
         // `1 | ascii_downcase` fails, but the remaining outputs are still collected.
         let stream = deserialize(r#"[1, "B", "a"]"#, None).unwrap();
-        let values = collect_scalar_values(".[] | ascii_downcase", &stream, 100).unwrap();
+        let values = collect_scalar_values(".[] | ascii_downcase", &vals(&stream), 100).unwrap();
         assert_eq!(values, vec![r#""a""#, r#""b""#]);
     }
 
     #[test]
     fn invalid_query_keeps_error() {
-        assert!(run_jaq(r#".users[] | select(.name == "Al"#, &input()).is_err());
-        assert!(run_jaq(r#".users[] | select(.name == "Al")"#, &input())
+        assert!(run(r#".users[] | select(.name == "Al"#, &input()).is_err());
+        assert!(run(r#".users[] | select(.name == "Al")"#, &input())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn to_val_matches_jaq_conversion() {
+        let stream = deserialize(
+            r#"[0, -7, 1.5, 1e2, 18446744073709551615, "s", true, null, {"k": [1, {"x": 2.0}]}]"#,
+            None,
+        )
+        .unwrap();
+        for v in &stream {
+            assert_eq!(to_val(v), Val::from(v.clone()), "{v}");
+        }
+    }
+
+    #[test]
+    fn cancellation_stops_evaluation() {
+        let stream = deserialize("[1,2,3] [4]", None).unwrap();
+        assert_eq!(run_jaq(".", &vals(&stream), &|| true).unwrap(), None);
+        assert_eq!(run(".[]", &stream).unwrap().len(), 4);
     }
 }

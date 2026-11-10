@@ -57,12 +57,8 @@ pub fn spawn_resize_render_task(
                 ])
                 .render()
                 .await?;
-            let text = {
-                let editor = shared_editor.read().await;
-                editor.text()
-            };
             json_viewer::render(
-                RenderTrigger::AreaResized { query: text },
+                RenderTrigger::AreaResized,
                 ctx.clone(),
                 shared_viewer_state.clone(),
                 shared_renderer.clone(),

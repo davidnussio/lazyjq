@@ -28,6 +28,7 @@ use context::{Index, SharedContext};
 mod event_dispatcher;
 mod guide;
 use guide::GuideAction;
+mod jq_worker;
 mod json;
 mod json_viewer;
 mod query_editor;
@@ -195,16 +196,12 @@ async fn main() -> anyhow::Result<()> {
     let _terminal_cleanup_guard = TerminalCleanupGuard;
     crossterm::execute!(io::stdout(), crossterm::cursor::Hide)?;
 
-    // Spawn the completion loader task, which will asynchronously load suggestions based on the input data.
-    let (shared_suggestions, completion_loader_task) = completion::spawn_initialize(
-        input,
-        config.json.max_streams,
-        config.completion.search_load_chunk_size,
-    );
+    // Store for path suggestions, filled in the background once the input has been parsed.
+    let shared_suggestions = completion::SharedSuggestionStore::new();
 
     // Initialize the completion navigator with shared suggestions and configuration.
     let completion_navigator = CompletionNavigator::new(
-        shared_suggestions,
+        shared_suggestions.clone(),
         listbox::State {
             listbox: Listbox::default(),
             config: config.completion.listbox,
@@ -356,11 +353,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Await JSON viewer bootstrap to complete, which will initialize the viewer with the input data and configuration.
     let shared_json_viewer = load_for_json_viewer.await?;
-    // Share the parsed input with the completion navigator to enable value suggestions.
-    {
-        let source = shared_json_viewer.lock().await.source();
-        shared_completion_navigator.write().await.set_source(source);
-    }
+    // Reuse the parsed input for completion: extract path suggestions in the background
+    // and share the jq evaluation thread to enable value suggestions.
+    let completion_loader_task = {
+        let viewer = shared_json_viewer.lock().await;
+        shared_completion_navigator
+            .write()
+            .await
+            .set_worker(viewer.worker());
+        shared_suggestions.spawn_loader(viewer.input(), config.completion.search_load_chunk_size)
+    };
     // Spawn the JSON viewer processor task, which will handle updates to the JSON viewer based on user input and query changes.
     let json_viewer_task = json_viewer::start_viewer_task(
         json_viewer_action_rx,
