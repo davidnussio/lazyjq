@@ -136,6 +136,11 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      # Hand-edited (dist allow-dirty = ["ci"]): GitHub runners can't resolve
+      # azure.archive.ubuntu.com, so point apt at the official Ubuntu archive.
+      - name: Use archive.ubuntu.com for apt
+        if: ${{ runner.os == 'Linux' && !matrix.container }}
+        run: echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
