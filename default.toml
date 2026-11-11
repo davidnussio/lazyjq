@@ -182,6 +182,8 @@ expand_all = ["e"]
 collapse_all = ["c"]
 # Narrow the query down to the selected node
 drill_down = ["f"]
+# Go back to the result before the last drill down (cursor and folds included)
+drill_up = ["Backspace", "u"]
 # Open the copy menu (query, result, path or value of the selected node)
 copy_menu = ["y"]
 # Go back to the query editor

@@ -41,8 +41,8 @@ need to be installed.
   keeps the last valid result and the error is shown on the Query panel border
   (e.g. `syntax error: missing closing quote`).
 - **Result navigation**: fold/unfold nodes, fold/unfold everything,
-  drill down into the selected node (the query becomes `… | .path.to.node`),
-  copy the path or the value of the selected node.
+  drill down into the selected node (the query becomes `… | .path.to.node`)
+  and back up again, copy the path or the value of the selected node.
 - **History** of the queries you ran, kept across sessions.
 - Mouse support: click to focus/select, wheel to scroll.
 - Fast on large inputs: the input is converted for jq once, evaluations run on
@@ -157,6 +157,7 @@ typing in the query editor.
 | <kbd>l</kbd>, <kbd>h</kbd> | Unfold (or enter) / fold (or go to parent) |
 | <kbd>e</kbd>, <kbd>c</kbd> | Unfold / fold everything |
 | <kbd>f</kbd> | Narrow the query down to the selected node |
+| <kbd>Backspace</kbd>, <kbd>u</kbd> | Back to the result before the last <kbd>f</kbd>, with cursor and folds as you left them |
 | <kbd>y</kbd> | Copy menu: path or value of the selected node, result, query |
 | <kbd>Esc</kbd> | Back to the query |
 

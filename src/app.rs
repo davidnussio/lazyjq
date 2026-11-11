@@ -114,6 +114,15 @@ pub struct ResultView {
     pub query: String,
 }
 
+/// A result left by drilling down into one of its nodes, to come back to.
+pub struct DrillStep {
+    pub query: String,
+    /// The tree as it was left (cursor and folds), once the drilled-down result
+    /// has replaced it. `None` for the input itself (kept in `input_tree`) or
+    /// while the drilled-down query is still being evaluated.
+    tree: Option<JsonTree>,
+}
+
 /// Outcome of evaluating a query in the background.
 pub enum Outcome {
     Tree(JsonTree),
@@ -164,6 +173,8 @@ pub struct App {
     pub spinner: usize,
     pub areas: Areas,
     pub paths: PathIndex,
+    /// Results to go back to, one per drill-down (most recent last).
+    pub drill_stack: Vec<DrillStep>,
 
     input: Arc<Vec<Value>>,
     worker: JqWorker,
@@ -225,6 +236,7 @@ impl App {
             spinner: 0,
             areas: Areas::default(),
             paths,
+            drill_stack: Vec::new(),
             input,
             worker,
             tx,
@@ -368,6 +380,13 @@ impl App {
         // Keep the unfiltered tree around (with its folds) for a quick return to `.`.
         if is_identity(&previous.query) && !is_identity(&self.result.query) {
             self.input_tree = Some(previous.tree);
+        } else if let Some(step) = self
+            .drill_stack
+            .last_mut()
+            .filter(|step| step.tree.is_none() && step.query == previous.query)
+        {
+            // The result we drilled down from: keep it as it was left.
+            step.tree = Some(previous.tree);
         }
         self.save_pending_history();
     }
@@ -816,6 +835,8 @@ impl App {
             tree.set_all_collapsed(true);
         } else if k.drill_down.matches(key) {
             self.drill_down();
+        } else if k.drill_up.matches(key) {
+            self.drill_up();
         } else if k.copy_menu.matches(key) {
             self.open_copy_menu();
         } else if k.back.matches(key) {
@@ -843,8 +864,49 @@ impl App {
         } else {
             format!("{base} | {path}")
         };
+        self.drill_stack.push(DrillStep {
+            query: self.result.query.clone(),
+            tree: None,
+        });
         self.set_query(&query);
         self.evaluate_now();
+    }
+
+    /// Go back to the result the last drill-down started from,
+    /// with its cursor and folds as they were left.
+    fn drill_up(&mut self) {
+        let Some(step) = self.drill_stack.pop() else {
+            self.notify("Nothing to go back to", Severity::Warning);
+            return;
+        };
+        let tree = step.tree.or_else(|| {
+            is_identity(&step.query)
+                .then(|| self.input_tree.take())
+                .flatten()
+        });
+
+        self.editor.set_text(&step.query);
+        self.history.reset_browse();
+        self.refresh_suggestions();
+        match tree {
+            Some(tree) => {
+                // Shown as is: drop any evaluation still running.
+                self.eval_deadline = None;
+                self.generation += 1;
+                self.requested_query = step.query.clone();
+                self.pending_history = None;
+                self.evaluating = false;
+                self.query_status = None;
+                self.empty_result = false;
+                self.result = ResultView {
+                    tree,
+                    query: step.query,
+                };
+            }
+            // The tree is not available (e.g. the drill-down was undone before
+            // its result arrived): evaluate the query again.
+            None => self.evaluate_now(),
+        }
     }
 
     fn open_copy_menu(&mut self) {
@@ -1049,5 +1111,82 @@ async fn evaluate(input: Arc<Vec<Value>>, worker: JqWorker, query: &str) -> Opti
         Ok(values) if values.iter().all(Value::is_null) => Some(Outcome::AllNull),
         Ok(values) => build(Arc::new(values)).await.map(Outcome::Tree),
         Err(e) => Some(Outcome::Failed(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn app(json: &str) -> (App, mpsc::UnboundedReceiver<AppEvent>) {
+        let config = Config::load_from("[history]\npersist = false").unwrap();
+        let input = Arc::new(crate::json::deserialize(json, None).unwrap());
+        let (tx, rx) = mpsc::unbounded_channel();
+        (App::new(config, input, None, tx), rx)
+    }
+
+    /// Process background events until the pending evaluation is applied.
+    async fn settle(app: &mut App, rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
+        while app.evaluating {
+            let event = rx.recv().await.unwrap();
+            app.handle_app_event(event);
+        }
+    }
+
+    const SAMPLE: &str = r#"{"users":[{"name":"Al","tags":["a","b"]}],"n":1}"#;
+
+    #[tokio::test]
+    async fn drill_up_restores_previous_results() {
+        let (mut app, mut rx) = app(SAMPLE).await;
+
+        app.result.tree.down(1); // "users": [
+        app.drill_down();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(app.result.query, ".users");
+
+        app.result.tree.down(1); // { (users[0])
+        app.result.tree.toggle(); // folded, to check it is kept
+        app.result.tree.down(1); // ] (end of users)
+        app.result.tree.up(1); // back on the folded object
+        app.drill_down();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(app.result.query, ".users | .[0]");
+        assert_eq!(app.editor.text(), ".users | .[0]");
+
+        app.drill_up();
+        assert_eq!(app.result.query, ".users");
+        assert_eq!(app.editor.text(), ".users");
+        assert_eq!(app.result.tree.cursor(), 1);
+        assert_eq!(
+            app.result
+                .tree
+                .render(5, &app.config.json, Default::default())
+                .0[1]
+                .to_string(),
+            "  {…} 2 keys"
+        );
+
+        app.drill_up();
+        assert_eq!(app.result.query, ".");
+        assert_eq!(app.result.tree.cursor(), 1);
+        assert!(app.drill_stack.is_empty());
+
+        app.drill_up();
+        assert!(app.toast.is_some());
+    }
+
+    #[tokio::test]
+    async fn drill_up_before_the_result_arrives() {
+        let (mut app, mut rx) = app(SAMPLE).await;
+        app.result.tree.down(1);
+        app.drill_down();
+        app.drill_up();
+        assert_eq!(app.result.query, ".");
+        // The late result of the abandoned drill-down is ignored.
+        while let Ok(event) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            app.handle_app_event(event.unwrap());
+        }
+        assert_eq!(app.result.query, ".");
+        assert!(!app.evaluating);
     }
 }

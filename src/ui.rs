@@ -341,6 +341,7 @@ fn hints(app: &App) -> Vec<(&Keys, &'static str)> {
         Panel::Result => vec![
             (&k.result.toggle, "fold"),
             (&k.result.drill_down, "drill down"),
+            (&k.result.drill_up, "back"),
             (&k.result.copy_menu, "copy"),
             (&k.result.expand_all, "expand all"),
             (&k.result.collapse_all, "collapse all"),
@@ -481,6 +482,10 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                 (
                     &k.result.drill_down,
                     "Narrow the query to the selected node",
+                ),
+                (
+                    &k.result.drill_up,
+                    "Back to the result before the last drill down",
                 ),
                 (&k.result.copy_menu, "Copy menu"),
                 (&k.result.back, "Back to the query"),

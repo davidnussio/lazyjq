@@ -225,6 +225,7 @@ pub struct ResultKeybinds {
     pub expand_all: Keys,
     pub collapse_all: Keys,
     pub drill_down: Keys,
+    pub drill_up: Keys,
     pub copy_menu: Keys,
     pub back: Keys,
 }
