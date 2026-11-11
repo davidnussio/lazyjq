@@ -1,142 +1,272 @@
-use std::collections::HashSet;
-
-use promkit_widgets::{core::crossterm::event::Event, jsonstream, listbox, text_editor};
-use serde::{Deserialize, Serialize};
-use termcfg::crossterm_config::event_set_serde;
+use serde::Deserialize;
 use tokio::time::Duration;
 
 mod duration;
 use duration::duration_serde;
+pub mod keys;
+pub use keys::Keys;
+mod style;
+use style::style_serde;
 
-#[derive(Serialize, Deserialize)]
-pub struct EditorConfig {
-    pub on_focus: text_editor::Config,
-    pub on_defocus: text_editor::Config,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct JsonConfig {
-    pub max_streams: Option<usize>,
-    pub stream: jsonstream::Config,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CompletionConfig {
-    pub listbox: listbox::Config,
-    pub search_result_chunk_size: usize,
-    pub search_load_chunk_size: usize,
-}
-
-// TODO: remove Clone derive
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Keybinds {
-    #[serde(with = "event_set_serde")]
-    pub exit: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub copy_query: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub copy_result: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub switch_mode: HashSet<Event>,
-    pub on_editor: EditorKeybinds,
-    pub on_json_viewer: JsonViewerKeybinds,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EditorKeybinds {
-    #[serde(with = "event_set_serde")]
-    pub backward: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub forward: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_head: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_tail: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_previous_nearest: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_next_nearest: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub erase: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub erase_all: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub erase_to_previous_nearest: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub erase_to_next_nearest: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub completion: HashSet<Event>,
-    pub on_completion: CompletionKeybinds,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct CompletionKeybinds {
-    #[serde(with = "event_set_serde")]
-    pub up: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub down: HashSet<Event>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct JsonViewerKeybinds {
-    #[serde(with = "event_set_serde")]
-    pub up: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub down: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_head: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub move_to_tail: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub toggle: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub expand: HashSet<Event>,
-    #[serde(with = "event_set_serde")]
-    pub collapse: HashSet<Event>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ReactivityControl {
-    #[serde(with = "duration_serde")]
-    pub query_debounce_duration: Duration,
-
-    #[serde(with = "duration_serde")]
-    pub resize_debounce_duration: Duration,
-
-    #[serde(with = "duration_serde")]
-    pub spin_duration: Duration,
-}
+use ratatui::{style::Style, widgets::BorderType};
 
 pub static DEFAULT_CONFIG: &str = include_str!("../default.toml");
 
-/// Note that the config struct and the `.toml` configuration file are
-/// managed separately because the current toml crate
-/// does not readily support the following features:
+/// Application configuration.
 ///
-/// - Preserve docstrings as comments in the `.toml` file
-///   - https://github.com/toml-rs/toml/issues/376
-/// - Output inline tables
-///   - https://github.com/toml-rs/toml/issues/592
-///
-/// Also difficult to patch `Config` using only the items specified in the configuration file
-/// (Premise: To address the complexity of configurations,
-/// it assumes using a macro to avoid managing Option-wrapped structures on our side).s
-///
-/// The main challenge is that, for nested structs,
-/// it is not able to wrap every leaf field with Option<>.
-/// https://github.com/colin-kiegel/rust-derive-builder/issues/254
-#[derive(Serialize, Deserialize)]
+/// The user configuration file is merged on top of the defaults (`default.toml`),
+/// so it only needs to contain the settings that differ from them.
+#[derive(Deserialize)]
 pub struct Config {
     pub no_hint: bool,
     pub reactivity_control: ReactivityControl,
+    pub ui: UiConfig,
+    pub theme: Theme,
     pub editor: EditorConfig,
     pub json: JsonConfig,
     pub completion: CompletionConfig,
+    pub history: HistoryConfig,
     pub keybinds: Keybinds,
 }
 
 impl Config {
+    /// Load the configuration, applying `content` on top of the defaults.
     pub fn load_from(content: &str) -> anyhow::Result<Self> {
-        toml::from_str(content).map_err(Into::into)
+        let mut base: toml::Table = toml::from_str(DEFAULT_CONFIG)?;
+        let user: toml::Table = toml::from_str(content)?;
+        merge(&mut base, user);
+        Ok(toml::Value::Table(base).try_into()?)
+    }
+}
+
+/// Recursively merge `overlay` into `base`; tables are merged, any other value replaces.
+fn merge(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(base_table)), toml::Value::Table(overlay_table)) => {
+                merge(base_table, overlay_table)
+            }
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ReactivityControl {
+    #[serde(with = "duration_serde")]
+    pub query_debounce_duration: Duration,
+    #[serde(with = "duration_serde")]
+    pub spin_duration: Duration,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+pub enum Border {
+    Plain,
+    Rounded,
+    Double,
+    Thick,
+}
+
+impl From<Border> for BorderType {
+    fn from(border: Border) -> Self {
+        match border {
+            Border::Plain => BorderType::Plain,
+            Border::Rounded => BorderType::Rounded,
+            Border::Double => BorderType::Double,
+            Border::Thick => BorderType::Thick,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UiConfig {
+    /// Width of the side panels column, in percent of the terminal width.
+    pub side_panel_width: u16,
+    /// Below this terminal width the panels are stacked vertically.
+    pub portrait_threshold: u16,
+    pub border: Border,
+}
+
+#[derive(Deserialize)]
+pub struct Theme {
+    #[serde(with = "style_serde")]
+    pub active_border: Style,
+    #[serde(with = "style_serde")]
+    pub inactive_border: Style,
+    #[serde(with = "style_serde")]
+    pub title: Style,
+    #[serde(with = "style_serde")]
+    pub selected_line: Style,
+    #[serde(with = "style_serde")]
+    pub inactive_selected_line: Style,
+    #[serde(with = "style_serde")]
+    pub hint_key: Style,
+    #[serde(with = "style_serde")]
+    pub hint_text: Style,
+    #[serde(with = "style_serde")]
+    pub dim: Style,
+    #[serde(with = "style_serde")]
+    pub success: Style,
+    #[serde(with = "style_serde")]
+    pub warning: Style,
+    #[serde(with = "style_serde")]
+    pub error: Style,
+}
+
+#[derive(Deserialize)]
+pub struct EditorConfig {
+    pub prompt: String,
+    #[serde(with = "style_serde")]
+    pub prompt_style: Style,
+    pub word_break_chars: Vec<char>,
+}
+
+#[derive(Deserialize)]
+pub struct JsonConfig {
+    pub max_streams: Option<usize>,
+    pub indent: usize,
+    #[serde(with = "style_serde")]
+    pub bracket_style: Style,
+    #[serde(with = "style_serde")]
+    pub key_style: Style,
+    #[serde(with = "style_serde")]
+    pub string_value_style: Style,
+    #[serde(with = "style_serde")]
+    pub number_value_style: Style,
+    #[serde(with = "style_serde")]
+    pub boolean_value_style: Style,
+    #[serde(with = "style_serde")]
+    pub null_value_style: Style,
+}
+
+#[derive(Deserialize)]
+pub struct CompletionConfig {
+    pub max_suggestions: usize,
+    pub max_value_suggestions: usize,
+}
+
+#[derive(Deserialize)]
+pub struct HistoryConfig {
+    pub persist: bool,
+    pub max_entries: usize,
+}
+
+#[derive(Deserialize)]
+pub struct Keybinds {
+    pub global: GlobalKeybinds,
+    pub query: QueryKeybinds,
+    pub list: ListKeybinds,
+    pub result: ResultKeybinds,
+    pub popup: PopupKeybinds,
+}
+
+#[derive(Deserialize)]
+pub struct GlobalKeybinds {
+    pub quit: Keys,
+    pub force_quit: Keys,
+    pub help: Keys,
+    pub copy_query: Keys,
+    pub copy_result: Keys,
+    pub focus_query: Keys,
+    pub focus_suggestions: Keys,
+    pub focus_history: Keys,
+    pub focus_result: Keys,
+    pub next_panel: Keys,
+    pub previous_panel: Keys,
+}
+
+#[derive(Deserialize)]
+pub struct QueryKeybinds {
+    pub submit: Keys,
+    pub leave: Keys,
+    pub complete: Keys,
+    pub history_previous: Keys,
+    pub history_next: Keys,
+    pub backward: Keys,
+    pub forward: Keys,
+    pub move_to_head: Keys,
+    pub move_to_tail: Keys,
+    pub move_to_previous_word: Keys,
+    pub move_to_next_word: Keys,
+    pub erase: Keys,
+    pub erase_forward: Keys,
+    pub erase_all: Keys,
+    pub erase_to_previous_word: Keys,
+    pub erase_to_next_word: Keys,
+    pub erase_to_tail: Keys,
+}
+
+#[derive(Deserialize)]
+pub struct ListKeybinds {
+    pub up: Keys,
+    pub down: Keys,
+    pub page_up: Keys,
+    pub page_down: Keys,
+    pub top: Keys,
+    pub bottom: Keys,
+    pub select: Keys,
+    pub back: Keys,
+    pub delete: Keys,
+}
+
+#[derive(Deserialize)]
+pub struct ResultKeybinds {
+    pub up: Keys,
+    pub down: Keys,
+    pub page_up: Keys,
+    pub page_down: Keys,
+    pub top: Keys,
+    pub bottom: Keys,
+    pub toggle: Keys,
+    pub expand: Keys,
+    pub collapse: Keys,
+    pub expand_all: Keys,
+    pub collapse_all: Keys,
+    pub drill_down: Keys,
+    pub copy_menu: Keys,
+    pub back: Keys,
+}
+
+#[derive(Deserialize)]
+pub struct PopupKeybinds {
+    pub up: Keys,
+    pub down: Keys,
+    pub select: Keys,
+    pub close: Keys,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_loads() {
+        let config = Config::load_from("").unwrap();
+        assert_eq!(config.json.indent, 2);
+    }
+
+    #[test]
+    fn user_config_overrides_only_given_keys() {
+        let config = Config::load_from(
+            r#"
+            [json]
+            indent = 4
+            [keybinds.global]
+            quit = "Ctrl+X"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.json.indent, 4);
+        assert_eq!(config.json.max_streams, None);
+        assert_eq!(config.keybinds.global.quit.display(), Some("Ctrl+X"));
+        assert!(config.keybinds.global.force_quit.display().is_some());
+    }
+
+    #[test]
+    fn invalid_values_are_reported() {
+        assert!(Config::load_from("[json]\nindent = \"two\"").is_err());
+        assert!(Config::load_from("[keybinds.global]\nquit = \"Ctrl+\"").is_err());
     }
 }

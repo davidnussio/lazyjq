@@ -1,10 +1,10 @@
 [package]
-name = "jnv"
-version = "0.7.1"
-authors = ["ynqa <un.pensiero.vano@gmail.com>"]
+name = "lazyjq"
+version = "0.1.0"
+authors = ["David Nussio", "ynqa <un.pensiero.vano@gmail.com>"]
 edition = "2021"
-description = "JSON navigator and interactive filter leveraging jq"
-repository = "https://github.com/ynqa/jnv"
+description = "A lazygit-style terminal UI to explore JSON with jq"
+repository = "https://github.com/davidnussio/lazyjq"
 license = "MIT"
 readme = "README.md"
 include = [
@@ -19,24 +19,23 @@ include = [
 anyhow = "1.0.102"
 arboard = { version = "3.6.1", features =  ["wayland-data-control"] }
 clap = { version = "4.6.0", features = ["derive"] }
+crossterm = { version = "0.29.0", features = ["event-stream", "use-dev-tty"] }
 duration-string = { version = "0.5.3", features = ["serde"] }
 dirs = "6.0.0"
 futures = "0.3.32"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache", "underline-color"] }
 rustix = { version = "1.1.4", features = ["stdio"] }
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 termcfg = { version = "0.2.0", features = ["crossterm_0_29_0"] }
 tokio = { version = "1.50.0", features = ["full"] }
 toml = "1.1.0"
+unicode-width = "0.2.0"
 
 # jaq dependencies
 jaq-core = "2.2.1"
 jaq-json = { version = "1.1.3", features = ["serde_json"] }
 jaq-std = "2.1.2"
-
-[dependencies.promkit-widgets]
-version = "0.5.0"
-features = ["jsonstream", "listbox", "serde", "spinner", "status", "texteditor"]
-default-features = false
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

@@ -1,187 +1,97 @@
-<p align="center">
-  <source media="(prefers-color-scheme: dark)" srcset="assets/jnv-dark.svg">
-  <img alt="Text describing the image" src="assets/jnv-light.svg" width="50%" height="50%">
-</p>
+# lazyjq
 
-[![ci](https://github.com/ynqa/jnv/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ynqa/jnv/actions/workflows/ci.yml)
+[![ci](https://github.com/davidnussio/lazyjq/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/davidnussio/lazyjq/actions/workflows/ci.yml)
 
-> [!TIP]
-> For JSON and YAML tree browsing, subtree exploration, and side-by-side query results, try [vy](https://vy.ynqa.dev), another terminal tool by the author of jnv.
+*lazyjq* is a terminal UI to explore JSON with `jq`, laid out like
+[lazygit](https://github.com/jesseduffield/lazygit): a query editor, side
+panels with suggestions and history, and the result in the main panel, all on
+screen at once and driven from the keyboard.
 
-*jnv* is designed for navigating JSON,
-offering an interactive JSON viewer and `jq` filter editor.
+```text
+╭[1] Query───────────────────────────────────────────────────────────────╮
+│❯ .users[] | select(.city == "Lugano")                                  │
+╰────────────────────────────────────────────────────────────────────────╯
+╭[2] Suggestions · paths───╮╭[4] Result · 1 value───────────────────────╮
+│.users                    ││{                                          │
+│.users[0]                 ││  "name": "Carla",                         │
+╰──────────────── 1 of 24 ─╯│  "age": 42,                               │
+╭[3] History───────────────╮│  "tags": […], 1 item                      │
+│.users | length           ││}                                          │
+│.meta                     ││                                           │
+╰───────────────── 1 of 2 ─╯╰─────────────────────────────── row 1 of 8 ╯
+ fold: enter | drill down: f | copy: y | expand all: e | query: 1 | help: ?
+```
 
-![demo](tapes/demo.gif)
-
-Inspired by [jid](https://github.com/simeji/jid)
-and [jiq](https://github.com/fiatjaf/jiq).
+lazyjq started as a fork of [jnv](https://github.com/ynqa/jnv) by ynqa and
+evaluates filters with [jaq](https://github.com/01mf02/jaq), so `jq` doesn't
+need to be installed.
 
 ## Features
 
-- Interactive JSON viewer and `jq` filter editor
-  - Syntax highlighting for JSON
-  - Use [jaq](https://github.com/01mf02/jaq) to apply `jq` filter
-    - This eliminates the need for users to prepare `jq` on their own
-- Configurable features via TOML configuration
-  - Toggle hint message display
-  - Adjust UI reactivity (debounce times and animation speed)
-  - Editor appearance and behavior
-  - JSON viewer styling
-  - Adjust completion feature display and behavior
-  - Keybinds
-- Capable of accommodating various format
-  - Input: File, stdin
-  - Data: A JSON or multiple JSON structures
-    that can be deserialized with 
-    [StreamDeserializer](https://docs.rs/serde_json/latest/serde_json/struct.StreamDeserializer.html),
-    such as [JSON Lines](https://jsonlines.org/)
-- Auto-completion for the filter
-  - Only supports:
-    - [Identity](https://jqlang.github.io/jq/manual/#identity)
-    - [Object Identifier-Index](https://jqlang.github.io/jq/manual/#object-identifier-index)
-    - [Array Index](https://jqlang.github.io/jq/manual/#array-index)
-- Hint message to evaluate the filter
+- **Panels like lazygit**: Query, Suggestions, History and Result, with a
+  focused panel, numbered shortcuts (`1`–`4`), a keybinding bar for the focused
+  panel and a help popup (`?`).
+- **Live suggestions**: the Suggestions panel follows what you type.
+  - Paths of the input (`.users[0].name`) matching the query.
+  - Values after a comparison or a string function, e.g.
+    `.users[] | select(.name == "Al` or `select(.email | endswith("`.
+  - <kbd>Tab</kbd> completes: a single candidate is inserted directly, otherwise
+    the candidates are previewed one by one (<kbd>Esc</kbd> restores the query).
+- **Stable result**: while the query is incomplete or invalid, the Result panel
+  keeps the last valid result and the error is shown on the Query panel border
+  (e.g. `syntax error: missing closing quote`).
+- **Result navigation**: fold/unfold nodes, fold/unfold everything,
+  drill down into the selected node (the query becomes `… | .path.to.node`),
+  copy the path or the value of the selected node.
+- **History** of the queries you ran, kept across sessions.
+- Mouse support: click to focus/select, wheel to scroll.
+- Fast on large inputs: the input is converted for jq once, evaluations run on
+  a dedicated thread and are cancelled when superseded.
+- Input from a file or stdin, one or more JSON values (e.g. [JSON Lines](https://jsonlines.org/)).
+- Configurable layout, colors and keybindings (TOML).
 
 ## Installation
-
-[![Packaging status](https://repology.org/badge/vertical-allrepos/jnv.svg)](https://repology.org/project/jnv/versions)
-
-### Homebrew
-
-See [here](https://formulae.brew.sh/formula/jnv) for more info.
-
-```bash
-brew install jnv
-```
-
-Or install via Homebrew Tap:
-
-```bash
-brew install ynqa/tap/jnv
-```
-
-### MacPorts
-
-See [here](https://ports.macports.org/port/jnv/) for more info.
-
-```bash
-sudo port install jnv
-```
-
-### Nix / NixOS
-
-See [package entry on search.nixos.org](https://search.nixos.org/packages?channel=unstable&query=jnv) for more info.
-
-```bash
-nix-shell -p jnv
-```
-
-### conda-forge
-
-See [here](https://prefix.dev/channels/conda-forge/packages/jnv) for more info.
-
-```bash
-pixi global install jnv
-# or
-cat data.json | pixi exec jnv
-# or
-conda install jnv
-```
-
-### Docker
-
-Build
-(In the near future, the image will be available on something of registries)
-
-```bash
-docker build -t jnv .
-```
-
-And Run
-(The following commad is just an example. Please modify the path to the file you want to mount)
-
-```bash
-docker run -it --rm -v $(pwd)/debug.json:/jnv/debug.json jnv /jnv/debug.json
-```
 
 ### Cargo
 
 ```bash
-cargo install jnv
+cargo install --git https://github.com/davidnussio/lazyjq
 ```
 
-## Examples
+### From source
 
 ```bash
-cat data.json | jnv
-
-# or
-jnv data.json
-
-# or write current result to stdout on exit (UNIX only)
-cat data.json | jnv --write-to-stdout | some-command
-# and also output to file
-cat data.json | jnv --write-to-stdout > result.json
+git clone https://github.com/davidnussio/lazyjq.git
+cd lazyjq
+cargo build --release
+./target/release/lazyjq data.json
 ```
 
-## Keymap
+### Docker
 
-| Key | Action |
-| :- | :- |
-| <kbd>Ctrl + C</kbd> | Exit |
-| <kbd>Ctrl + Q</kbd> | Copy jq filter to clipboard |
-| <kbd>Ctrl + O</kbd> | Copy JSON to clipboard |
-| <kbd>Shift + ↑</kbd>, <kbd>Shift + ↓</kbd> | Switch to another mode |
-
-### Editor mode (default)
-
-| Key | Action |
-| :- | :- |
-| <kbd>Tab</kbd> | Enter suggestion |
-| <kbd>←</kbd> | Move cursor left |
-| <kbd>→</kbd> | Move cursor right |
-| <kbd>Ctrl + A</kbd> | Move cursor to line start |
-| <kbd>Ctrl + E</kbd> | Move cursor to line end |
-| <kbd>Backspace</kbd> | Delete character before cursor |
-| <kbd>Ctrl + U</kbd> | Clear entire line |
-| <kbd>Alt + B</kbd>   | Move the cursor to the previous nearest character within set(`.`,`\|`,`(`,`)`,`[`,`]`) |
-| <kbd>Alt + F</kbd>   | Move the cursor to the next nearest character within set(`.`,`\|`,`(`,`)`,`[`,`]`) |
-| <kbd>Ctrl + W</kbd>  | Erase to the previous nearest character within set(`.`,`\|`,`(`,`)`,`[`,`]`) |
-| <kbd>Alt + D</kbd>   | Erase to the next nearest character within set(`.`,`\|`,`(`,`)`,`[`,`]`) |
-
-#### Suggestion in Editor (after <kbd>Tab</kbd>)
-
-| Key | Action |
-| :- | :- |
-| <kbd>Tab</kbd>, <kbd>↓</kbd> | Select next suggestion |
-| <kbd>↑</kbd> | Select previous suggestion |
-| Others | Return to editor |
-
-### JSON viewer mode
-
-| Key | Action |
-| :- | :- |
-| <kbd>↑</kbd>, <kbd>Ctrl + K</kbd> | Move up |
-| <kbd>↓</kbd>, <kbd>Ctrl + J</kbd> | Move down |
-| <kbd>Ctrl + H</kbd> | Move to last entry |
-| <kbd>Ctrl + L</kbd> | Move to first entry |
-| <kbd>Enter</kbd> | Toggle fold |
-| <kbd>Ctrl + P</kbd> | Expand all |
-| <kbd>Ctrl + N</kbd> | Collapse all |
+```bash
+docker build -t lazyjq .
+docker run -it --rm -v $(pwd)/data.json:/data.json lazyjq /data.json
+```
 
 ## Usage
 
 ```bash
-JSON navigator and interactive filter leveraging jq
+cat data.json | lazyjq
 
-Usage: jnv [OPTIONS] [INPUT]
+# or
+lazyjq data.json
 
-Examples:
-- Read from a file:
-        jnv data.json
+# start with a filter
+lazyjq --default-filter '.users[0]' data.json
 
-- Read from standard input:
-        cat data.json | jnv
+# write the current result to stdout on exit (UNIX only)
+cat data.json | lazyjq --write-to-stdout | some-command
+cat data.json | lazyjq --write-to-stdout > result.json
+```
+
+```text
+Usage: lazyjq [OPTIONS] [INPUT]
 
 Arguments:
   [INPUT]  Optional path to a JSON file. If not provided or if "-" is specified, reads from standard input
@@ -194,238 +104,104 @@ Options:
   -V, --version                          Print version
 ```
 
+## Keybindings
+
+Press <kbd>?</kbd> (or <kbd>F1</kbd> while typing) to see all the keybindings.
+Single-character bindings such as <kbd>q</kbd> or <kbd>?</kbd> don't apply while
+typing in the query editor.
+
+### Global
+
+| Key | Action |
+| :- | :- |
+| <kbd>q</kbd>, <kbd>Ctrl + C</kbd> | Quit (<kbd>q</kbd> outside the query editor) |
+| <kbd>?</kbd>, <kbd>F1</kbd> | Help |
+| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> | Focus Query / Suggestions / History / Result |
+| <kbd>/</kbd>, <kbd>i</kbd> | Focus the query editor |
+| <kbd>←</kbd>, <kbd>→</kbd> | Previous / next panel |
+| <kbd>Ctrl + Q</kbd> | Copy the query |
+| <kbd>Ctrl + O</kbd> | Copy the result |
+
+### [1] Query
+
+| Key | Action |
+| :- | :- |
+| <kbd>Enter</kbd> | Run now, save to history and focus the result |
+| <kbd>Esc</kbd> | Focus the result |
+| <kbd>Tab</kbd> | Complete from Suggestions |
+| <kbd>↑</kbd>, <kbd>↓</kbd> | Browse the history |
+| <kbd>Ctrl + A</kbd>, <kbd>Ctrl + E</kbd> | Beginning / end of the line |
+| <kbd>Alt + B</kbd>, <kbd>Alt + F</kbd> | Previous / next word |
+| <kbd>Ctrl + W</kbd>, <kbd>Alt + D</kbd> | Delete the previous / next word |
+| <kbd>Ctrl + U</kbd> | Clear the query |
+| <kbd>Ctrl + K</kbd> | Delete to the end of the line |
+
+### [2] Suggestions and [3] History
+
+| Key | Action |
+| :- | :- |
+| <kbd>j</kbd>, <kbd>k</kbd>, <kbd>↓</kbd>, <kbd>↑</kbd>, <kbd>Tab</kbd> | Move |
+| <kbd>g</kbd>, <kbd>G</kbd> | First / last item |
+| <kbd>Enter</kbd> | Put the item in the query (History: and run it) |
+| <kbd>Esc</kbd> | Back to the query (Suggestions: undo the completion) |
+| <kbd>d</kbd> | Delete the history entry |
+
+### [4] Result
+
+| Key | Action |
+| :- | :- |
+| <kbd>j</kbd>, <kbd>k</kbd>, <kbd>↓</kbd>, <kbd>↑</kbd> | Move |
+| <kbd>Ctrl + D</kbd>, <kbd>Ctrl + U</kbd> | Half page down / up |
+| <kbd>g</kbd>, <kbd>G</kbd> | Top / bottom |
+| <kbd>Enter</kbd>, <kbd>Space</kbd> | Fold / unfold |
+| <kbd>l</kbd>, <kbd>h</kbd> | Unfold (or enter) / fold (or go to parent) |
+| <kbd>e</kbd>, <kbd>c</kbd> | Unfold / fold everything |
+| <kbd>f</kbd> | Narrow the query down to the selected node |
+| <kbd>y</kbd> | Copy menu: path or value of the selected node, result, query |
+| <kbd>Esc</kbd> | Back to the query |
+
 ## Configuration
 
-jnv uses a TOML format configuration file to customize various features. 
-The configuration file is loaded in the following order of priority:
+The configuration file is looked up in this order:
 
-1. Path specified on the command line (`-c` or `--config` option)
-2. Default configuration file path
+1. The path given with `-c` / `--config`
+2. The default location, following the `dirs` crate:
+   - **Linux**: `~/.config/lazyjq/config.toml`
+   - **macOS**: `~/Library/Application Support/lazyjq/config.toml`
+   - **Windows**: `C:\Users\{Username}\AppData\Roaming\lazyjq\config.toml`
 
-### Default Configuration File Location
-
-Following the `dirs` crate,
-the default configuration file location for each platform is as follows:
-
-- **Linux**: `~/.config/jnv/config.toml`
-- **macOS**: `~/Library/Application Support/jnv/config.toml`
-- **Windows**: `C:\Users\{Username}\AppData\Roaming\jnv\config.toml`
-
-If the configuration file does not exist,
-it will be automatically created on first run.
-
-### Configuration
-
-> [!IMPORTANT]
-> The syntax in TOML configurations
-> like [default.toml](./default.toml) was revamped in v0.7.0,
-> and the configuration shown below reflects the new format.
-> A migration tool is not provided for this change.
-> Please manually replace/update your local
-> `config.toml` to match the new syntax.
-
-> [!WARNING]
-> Depending on the type of terminal and environment,
-> characters and styles may not be displayed properly.
-> Specific key bindings and decorative characters may not
-> display or function correctly in certain terminal emulators.
-
-<details>
-<summary>The following settings are available in config.toml</summary>
+If the file does not exist it is created with the defaults on the first run.
+Your file is merged on top of the built-in defaults, so it only needs the
+settings you want to change, for example:
 
 ```toml
-# Whether to hide hint messages
-no_hint = false
+[ui]
+side_panel_width = 40
+border = "Plain"
 
-# Editor settings
-# Uses promkit_widgets::text_editor::Config directly
-[editor.on_focus]
+[theme]
+selected_line = "bg=#44475A,attr=bold"
 
-# Editor mode
-# "Insert": Insert characters at the cursor position
-# "Overwrite": Replace characters at the cursor position with new ones
-edit_mode = "Insert"
-
-# Characters considered as word boundaries
-# These are used to define word movement and deletion behavior in the editor
-word_break_chars = [".", "|", "(", ")", "[", "]"]
-
-# Style notation (termcfg)
-# Format: "fg=<color>,bg=<color>,ul=<color>,attr=<token|token...>"
-# Examples:
-# - "fg=blue"
-# - "fg=#00FF00,bg=black,attr=bold|underlined"
-# - "attr=dim"
-#
-# Color tokens:
-# - reset, black, red, green, yellow, blue, magenta, cyan, white
-# - darkgrey, darkred, darkgreen, darkyellow, darkblue, darkmagenta, darkcyan, grey
-# - #RRGGBB
-#
-# Attribute tokens (examples):
-# - bold, italic, underlined, dim, reverse, crossedout, nounderline, nobold
-#
-# Notes:
-# - ANSI 256-color index tokens (0..255, e.g. "200") are currently out of notation scope.
-# - See termcfg notation reference for full token list.
-#
-# References:
-# - https://github.com/ynqa/termcfg/blob/main/Notations.md
-# - https://github.com/ynqa/termcfg
-
-# Prefix shown before the cursor
-prefix = "❯❯ "
-# Style for the prefix
-prefix_style = "fg=blue"
-# Style for the character under the cursor
-active_char_style = "bg=magenta"
-# Style for all other characters
-inactive_char_style = ""
-
-# Theme settings when the editor is unfocused
-[editor.on_defocus]
-# Prefix shown when focus is lost
-prefix = "▼ "
-# Style for the prefix when unfocused
-prefix_style = "fg=blue,attr=dim"
-# Style for the character under the cursor when unfocused
-active_char_style = "attr=dim"
-# Style for all other characters when unfocused
-inactive_char_style = "attr=dim"
-
-# JSON display settings
-[json]
-# Maximum number of JSON objects to read from streams (e.g., JSON Lines format)
-# Limits how many objects are processed to reduce memory usage when handling large data streams
-# No limit if unset
-# max_streams =
-
-# JSON display settings
-# Uses promkit_widgets::jsonstream::Config directly
-[json.stream]
-# Number of spaces to use for indentation
-indent = 2
-# Style for curly brackets {}
-curly_brackets_style = "attr=bold"
-# Style for square brackets []
-square_brackets_style = "attr=bold"
-# Style for JSON keys
-key_style = "fg=cyan"
-# Style for string values
-string_value_style = "fg=green"
-# Style for number values
-number_value_style = ""
-# Style for boolean values
-boolean_value_style = ""
-# Style for null values
-null_value_style = "fg=grey"
-# Attribute for the selected row and unselected rows
-active_item_attribute = "bold"
-# Attribute for unselected rows
-inactive_item_attribute = "dim"
-# Behavior when JSON content exceeds the available width
-# "Wrap": Wrap content to the next line
-# "Truncate": Truncate content with an ellipsis (...)
-overflow_mode = "Wrap"
-
-# Completion feature settings
-[completion]
-# Settings for background loading of completion candidates
-#
-# Number of candidates loaded per chunk for search results
-# A larger value displays results faster but uses more memory
-search_result_chunk_size = 100
-
-# Number of items loaded per batch during background loading
-# A larger value finishes loading sooner but uses more memory temporarily
-search_load_chunk_size = 50000
-
-# Completion UI settings
-# Uses promkit_widgets::listbox::Config directly
-[completion.listbox]
-# Number of lines to display for completion candidates
-lines = 3
-# Cursor character shown before the selected candidate
-cursor = "❯ "
-# Style for the selected candidate
-active_item_style = "fg=grey,bg=yellow"
-# Style for unselected candidates
-inactive_item_style = "fg=grey"
-
-# Keybinding settings
-[keybinds]
-# Key to exit the application
-exit = ["Ctrl+C"]
-# Key to copy the query to the clipboard
-copy_query = ["Ctrl+Q"]
-# Key to copy the result to the clipboard
-copy_result = ["Ctrl+O"]
-# Keys to switch focus between editor and JSON viewer
-switch_mode = ["Shift+Down", "Shift+Up"]
-
-# Keybindings for editor operations
-[keybinds.on_editor]
-# Move cursor left
-backward = ["Left"]
-
-# Move cursor right
-forward = ["Right"]
-
-# Move cursor to beginning of line
-move_to_head = ["Ctrl+A"]
-# Move cursor to end of line
-move_to_tail = ["Ctrl+E"]
-# Move cursor to previous word boundary
-move_to_previous_nearest = ["Alt+B"]
-# Move cursor to next word boundary
-move_to_next_nearest = ["Alt+F"]
-# Delete character at the cursor
-erase = ["Backspace"]
-
-# Delete all input
-erase_all = ["Ctrl+U"]
-
-# Delete from cursor to previous word boundary
-erase_to_previous_nearest = ["Ctrl+W"]
-# Delete from cursor to next word boundary
-erase_to_next_nearest = ["Alt+D"]
-# Trigger completion
-completion = ["Tab"]
-# Move up in the completion list
-on_completion.up = ["Up"]
-# Move down in the completion list
-on_completion.down = ["Down", "Tab"]
-
-# Keybindings for JSON viewer operations
-[keybinds.on_json_viewer]
-# Move up in JSON viewer
-up = ["Up", "Ctrl+K", "ScrollUp"]
-# Move down in JSON viewer
-down = ["Down", "Ctrl+J", "ScrollDown"]
-# Move to the top of JSON viewer
-move_to_head = ["Ctrl+L"]
-# Move to the bottom of JSON viewer
-move_to_tail = ["Ctrl+H"]
-# Toggle expand/collapse of JSON nodes
-toggle = ["Enter"]
-# Expand all JSON nodes
-expand = ["Ctrl+P"]
-# Collapse all JSON nodes
-collapse = ["Ctrl+N"]
-
-# Application reactivity settings
-[reactivity_control]
-# Delay before processing query input
-# Prevents excessive updates while user is typing
-query_debounce_duration = "600ms"
-
-# Delay before redrawing after window resize
-# Prevents frequent redraws during continuous resizing
-resize_debounce_duration = "200ms"
-
-# Interval for spinner animation updates
-# Controls the speed of the loading spinner
-spin_duration = "300ms"
+[keybinds.global]
+quit = ["q", "Ctrl+D"]
 ```
 
-</details>
+See [default.toml](./default.toml) for every setting (layout, colors, JSON
+styles, suggestions, history and keybindings) with its documentation. Styles
+use the [termcfg notation](https://github.com/ynqa/termcfg/blob/main/Notations.md),
+e.g. `"fg=blue,attr=bold"`.
+
+The query history is stored in the data directory
+(`~/.local/share/lazyjq/history` on Linux,
+`~/Library/Application Support/lazyjq/history` on macOS);
+set `history.persist = false` to keep it in memory only.
+
+> [!NOTE]
+> lazyjq doesn't read jnv's configuration: the layout and the settings are different.
+
+## Credits
+
+- [jnv](https://github.com/ynqa/jnv) by ynqa, which lazyjq is forked from
+- [lazygit](https://github.com/jesseduffield/lazygit) for the interface
+- [jaq](https://github.com/01mf02/jaq) for the `jq` implementation
+- [ratatui](https://ratatui.rs) for the terminal UI

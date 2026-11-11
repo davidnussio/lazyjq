@@ -1,18 +1,10 @@
-# Whether to hide hint messages
+# lazyjq configuration
+#
+# This file is merged on top of the built-in defaults:
+# you can delete any setting you don't want to change.
+
+# Whether to hide the keybinding hints in the bottom bar
 no_hint = false
-
-# Editor settings
-# Uses promkit_widgets::text_editor::Config directly
-[editor.on_focus]
-
-# Editor mode
-# "Insert": Insert characters at the cursor position
-# "Overwrite": Replace characters at the cursor position with new ones
-edit_mode = "Insert"
-
-# Characters considered as word boundaries
-# These are used to define word movement and deletion behavior in the editor
-word_break_chars = [".", "|", "(", ")", "[", "]"]
 
 # Style notation (termcfg)
 # Format: "fg=<color>,bg=<color>,ul=<color>,attr=<token|token...>"
@@ -29,33 +21,49 @@ word_break_chars = [".", "|", "(", ")", "[", "]"]
 # Attribute tokens (examples):
 # - bold, italic, underlined, dim, reverse, crossedout, nounderline, nobold
 #
-# Notes:
-# - ANSI 256-color index tokens (0..255, e.g. "200") are currently out of notation scope.
-# - See termcfg notation reference for full token list.
-#
 # References:
 # - https://github.com/ynqa/termcfg/blob/main/Notations.md
-# - https://github.com/ynqa/termcfg
 
-# Prefix shown before the cursor
-prefix = "❯❯ "
-# Style for the prefix
-prefix_style = "fg=blue"
-# Style for the character under the cursor
-active_char_style = "bg=magenta"
-# Style for all other characters
-inactive_char_style = ""
+# Layout
+[ui]
+# Width of the side panels column (Suggestions, History), in percent of the terminal width
+side_panel_width = 33
+# Below this terminal width the panels are stacked vertically
+portrait_threshold = 80
+# Border type: "Plain", "Rounded", "Double" or "Thick"
+border = "Rounded"
 
-# Theme settings when the editor is unfocused
-[editor.on_defocus]
-# Prefix shown when focus is lost
-prefix = "▼ "
-# Style for the prefix when unfocused
-prefix_style = "fg=blue,attr=dim"
-# Style for the character under the cursor when unfocused
-active_char_style = "attr=dim"
-# Style for all other characters when unfocused
-inactive_char_style = "attr=dim"
+# Colors of the panels, hints and messages
+[theme]
+# Border and title of the focused panel
+active_border = "fg=green,attr=bold"
+# Border of the other panels
+inactive_border = ""
+# Panel titles
+title = ""
+# Selected line in the focused panel
+selected_line = "bg=darkblue,attr=bold"
+# Selected line in the other panels
+inactive_selected_line = "attr=bold"
+# Keys in the hint bar and in the help popup
+hint_key = "fg=blue"
+# Descriptions in the hint bar
+hint_text = ""
+# Secondary text (counters, placeholders)
+dim = "fg=darkgrey"
+# Messages
+success = "fg=green"
+warning = "fg=yellow"
+error = "fg=red"
+
+# Query editor
+[editor]
+# Prompt shown before the query
+prompt = "❯ "
+prompt_style = "fg=blue"
+# Characters considered as word boundaries
+# These are used to define word movement and deletion behavior in the editor
+word_break_chars = [".", "|", "(", ")", "[", "]", " "]
 
 # JSON display settings
 [json]
@@ -64,15 +72,10 @@ inactive_char_style = "attr=dim"
 # No limit if unset
 # max_streams =
 
-# JSON display settings
-# Uses promkit_widgets::jsonstream::Config directly
-[json.stream]
 # Number of spaces to use for indentation
 indent = 2
-# Style for curly brackets {}
-curly_brackets_style = "attr=bold"
-# Style for square brackets []
-square_brackets_style = "attr=bold"
+# Style for curly and square brackets
+bracket_style = "attr=bold"
 # Style for JSON keys
 key_style = "fg=cyan"
 # Style for string values
@@ -80,113 +83,113 @@ string_value_style = "fg=green"
 # Style for number values
 number_value_style = ""
 # Style for boolean values
-boolean_value_style = ""
+boolean_value_style = "fg=magenta"
 # Style for null values
 null_value_style = "fg=grey"
-# Attribute for the selected row and unselected rows
-active_item_attribute = "bold"
-# Attribute for unselected rows
-inactive_item_attribute = "dim"
-# Behavior when JSON content exceeds the available width
-# "Wrap": Wrap content to the next line
-# "Truncate": Truncate content with an ellipsis (...)
-overflow_mode = "Wrap"
 
-# Completion feature settings
+# Suggestions panel
 [completion]
-# Settings for background loading of completion candidates
-#
-# Number of candidates loaded per chunk for search results
-# A larger value displays results faster but uses more memory
-search_result_chunk_size = 100
+# Maximum number of path suggestions listed
+max_suggestions = 1000
+# Maximum number of distinct values collected for value suggestions
+max_value_suggestions = 10000
 
-# Number of items loaded per batch during background loading
-# A larger value finishes loading sooner but uses more memory temporarily
-search_load_chunk_size = 50000
-
-# Completion UI settings
-# Uses promkit_widgets::listbox::Config directly
-[completion.listbox]
-# Number of lines to display for completion candidates
-lines = 3
-# Cursor character shown before the selected candidate
-cursor = "❯ "
-# Style for the selected candidate
-active_item_style = "fg=grey,bg=yellow"
-# Style for unselected candidates
-inactive_item_style = "fg=grey"
-
-# Keybinding settings
-[keybinds]
-# Key to exit the application
-exit = ["Ctrl+C"]
-# Key to copy the query to the clipboard
-copy_query = ["Ctrl+Q"]
-# Key to copy the result to the clipboard
-copy_result = ["Ctrl+O"]
-# Keys to switch focus between editor and JSON viewer
-switch_mode = ["Shift+Down", "Shift+Up"]
-
-# Keybindings for editor operations
-[keybinds.on_editor]
-# Move cursor left
-backward = ["Left"]
-
-# Move cursor right
-forward = ["Right"]
-
-# Move cursor to beginning of line
-move_to_head = ["Ctrl+A"]
-# Move cursor to end of line
-move_to_tail = ["Ctrl+E"]
-# Move cursor to previous word boundary
-move_to_previous_nearest = ["Alt+B"]
-# Move cursor to next word boundary
-move_to_next_nearest = ["Alt+F"]
-# Delete character at the cursor
-erase = ["Backspace"]
-
-# Delete all input
-erase_all = ["Ctrl+U"]
-
-# Delete from cursor to previous word boundary
-erase_to_previous_nearest = ["Ctrl+W"]
-# Delete from cursor to next word boundary
-erase_to_next_nearest = ["Alt+D"]
-# Trigger completion
-completion = ["Tab"]
-# Move up in the completion list
-on_completion.up = ["Up"]
-# Move down in the completion list
-on_completion.down = ["Down", "Tab"]
-
-# Keybindings for JSON viewer operations
-[keybinds.on_json_viewer]
-# Move up in JSON viewer
-up = ["Up", "Ctrl+K", "ScrollUp"]
-# Move down in JSON viewer
-down = ["Down", "Ctrl+J", "ScrollDown"]
-# Move to the top of JSON viewer
-move_to_head = ["Ctrl+L"]
-# Move to the bottom of JSON viewer
-move_to_tail = ["Ctrl+H"]
-# Toggle expand/collapse of JSON nodes
-toggle = ["Enter"]
-# Expand all JSON nodes
-expand = ["Ctrl+P"]
-# Collapse all JSON nodes
-collapse = ["Ctrl+N"]
+# History panel
+[history]
+# Keep the query history across sessions
+persist = true
+# Maximum number of queries kept
+max_entries = 200
 
 # Application reactivity settings
 [reactivity_control]
-# Delay before processing query input
-# Prevents excessive updates while user is typing
-query_debounce_duration = "600ms"
-
-# Delay before redrawing after window resize
-# Prevents frequent redraws during continuous resizing
-resize_debounce_duration = "200ms"
-
+# Delay after the last keystroke before the query is evaluated
+query_debounce_duration = "250ms"
 # Interval for spinner animation updates
-# Controls the speed of the loading spinner
-spin_duration = "300ms"
+spin_duration = "100ms"
+
+# Keybinding settings
+#
+# Bindings made only of printable characters (like "q" or "?") are ignored
+# while typing in the query editor.
+[keybinds.global]
+quit = ["q"]
+force_quit = ["Ctrl+C"]
+help = ["?", "F1"]
+copy_query = ["Ctrl+Q"]
+copy_result = ["Ctrl+O"]
+focus_query = ["1", "/", "i"]
+focus_suggestions = ["2"]
+focus_history = ["3"]
+focus_result = ["4"]
+next_panel = ["Right"]
+previous_panel = ["Left"]
+
+# Query editor
+[keybinds.query]
+# Evaluate the query now, save it to the history and focus the result
+submit = ["Enter"]
+# Focus the result without saving the query
+leave = ["Esc", "Shift+Down"]
+# Complete the query from the Suggestions panel
+complete = ["Tab"]
+# Browse the history
+history_previous = ["Up"]
+history_next = ["Down"]
+backward = ["Left"]
+forward = ["Right"]
+move_to_head = ["Ctrl+A", "Home"]
+move_to_tail = ["Ctrl+E", "End"]
+move_to_previous_word = ["Alt+B", "Ctrl+Left"]
+move_to_next_word = ["Alt+F", "Ctrl+Right"]
+erase = ["Backspace"]
+erase_forward = ["Delete", "Ctrl+D"]
+erase_all = ["Ctrl+U"]
+erase_to_previous_word = ["Ctrl+W", "Alt+Backspace"]
+erase_to_next_word = ["Alt+D"]
+erase_to_tail = ["Ctrl+K"]
+
+# Suggestions and History panels
+[keybinds.list]
+up = ["Up", "k", "Shift+Tab"]
+down = ["Down", "j", "Tab"]
+page_up = ["PageUp", "Ctrl+B"]
+page_down = ["PageDown", "Ctrl+F"]
+top = ["g", "Home"]
+bottom = ["G", "End"]
+# Put the selected item in the query
+select = ["Enter"]
+# Go back to the query editor (from Suggestions: restoring the query)
+back = ["Esc"]
+# Delete the selected history entry
+delete = ["d"]
+
+# Result panel
+[keybinds.result]
+up = ["Up", "k"]
+down = ["Down", "j"]
+page_up = ["PageUp", "Ctrl+U", "Ctrl+B"]
+page_down = ["PageDown", "Ctrl+D", "Ctrl+F"]
+top = ["g", "Home"]
+bottom = ["G", "End"]
+# Fold/unfold the selected object or array
+toggle = ["Enter", "Space"]
+# Unfold the selected node
+expand = ["l"]
+# Fold the selected node (or jump to its parent)
+collapse = ["h"]
+expand_all = ["e"]
+collapse_all = ["c"]
+# Narrow the query down to the selected node
+drill_down = ["f"]
+# Open the copy menu (query, result, path or value of the selected node)
+copy_menu = ["y"]
+# Go back to the query editor
+back = ["Esc", "Shift+Up"]
+
+# Popups (help, copy menu)
+[keybinds.popup]
+up = ["Up", "k"]
+down = ["Down", "j"]
+select = ["Enter"]
+close = ["Esc", "q"]
