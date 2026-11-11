@@ -10,6 +10,8 @@
 //! ╭─[3] History─────────╮│   ...                         │
 //! │ .users[0]           ││                               │
 //! ╰─────────────────────╯╰───────────────────────────────╯
+//! (panel 3 shows the documentation of the selected function instead of
+//! the History when Suggestions lists jq functions)
 //!  Run: enter | Complete: tab | ...              lazyjq 0.1.0
 //! ```
 
@@ -17,14 +19,15 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, Areas, Panel, Popup, Severity},
-    config::{Config, Keys},
+    builtins,
+    config::{Config, Keys, Theme},
     suggestions::SuggestionKind,
 };
 
@@ -86,6 +89,15 @@ fn is_active(app: &App, panel: Panel) -> bool {
 }
 
 fn panel_block(app: &App, panel: Panel, extra: Option<Span<'static>>) -> Block<'static> {
+    titled_block(app, panel, panel.title(), extra)
+}
+
+fn titled_block(
+    app: &App,
+    panel: Panel,
+    name: &str,
+    extra: Option<Span<'static>>,
+) -> Block<'static> {
     let config = &app.config;
     let active = is_active(app, panel);
     let border = if active {
@@ -99,7 +111,7 @@ fn panel_block(app: &App, panel: Panel, extra: Option<Span<'static>>) -> Block<'
         config.theme.title
     };
     let mut title = vec![Span::styled(
-        format!("[{}] {}", panel.number(), panel.title()),
+        format!("[{}] {name}", panel.number()),
         title_style,
     )];
     if let Some(extra) = extra {
@@ -181,6 +193,7 @@ fn draw_suggestions(frame: &mut Frame, app: &mut App, area: Rect) {
     let kind = match s.kind {
         SuggestionKind::Paths => "paths",
         SuggestionKind::Values => "values",
+        SuggestionKind::Functions => "functions",
     };
     let loading = s.kind == SuggestionKind::Paths && !app.paths.is_complete();
     let extra = if loading {
@@ -218,6 +231,10 @@ fn draw_suggestions(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_history(frame: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(name) = app.docs_function() {
+        draw_docs(frame, app, area, &name);
+        return;
+    }
     let config = app.config.clone();
     let entries = app.history.entries();
     let block = panel_block(app, Panel::History, None).title_bottom(counter(
@@ -246,6 +263,104 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_style(list_highlight(app, Panel::History));
     app.history_list.select(Some(app.history.selected));
     frame.render_stateful_widget(list, area, &mut app.history_list);
+}
+
+fn draw_docs(frame: &mut Frame, app: &mut App, area: Rect, name: &str) {
+    let config = app.config.clone();
+    if app.docs.name != name {
+        app.docs.name = name.to_string();
+        app.docs.scroll = 0;
+    }
+    let lines = doc_lines(builtins::doc(name).unwrap_or_default(), &config.theme);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+
+    let mut block = titled_block(
+        app,
+        Panel::History,
+        "Docs",
+        Some(Span::styled(format!("· {name}"), config.theme.dim)),
+    );
+    let inner = block.inner(area);
+    let total = paragraph.line_count(inner.width);
+    app.docs.max_scroll = total.saturating_sub(usize::from(inner.height));
+    app.docs.scroll = app.docs.scroll.min(app.docs.max_scroll);
+    if app.docs.max_scroll > 0 {
+        block = block.title_bottom(
+            Line::styled(
+                format!(" line {} of {total} ", app.docs.scroll + 1),
+                config.theme.dim,
+            )
+            .alignment(Alignment::Right),
+        );
+    }
+    let scroll = u16::try_from(app.docs.scroll).unwrap_or(u16::MAX);
+    frame.render_widget(paragraph.block(block).scroll((scroll, 0)), area);
+}
+
+/// Render the Markdown documentation of a builtin: `#` headings, `- ` list
+/// items and `` `code` `` spans (the only constructs used by the jq manual entries).
+fn doc_lines(doc: &str, theme: &Theme) -> Vec<Line<'static>> {
+    reflow(doc)
+        .iter()
+        .map(|line| {
+            if let Some(heading) = line.strip_prefix("## ").or(line.strip_prefix("# ")) {
+                let heading = heading.replace('`', "");
+                return Line::styled(heading, theme.doc_heading);
+            }
+            if let Some(item) = line.strip_prefix("- ") {
+                let mut spans = vec![Span::styled("• ", theme.dim)];
+                spans.extend(inline_code(item, theme));
+                return Line::from(spans);
+            }
+            for label in ["Input:", "Output:"] {
+                if let Some(rest) = line.strip_prefix(label) {
+                    let mut spans = vec![Span::styled(format!("  {label}"), theme.dim)];
+                    spans.extend(inline_code(rest, theme));
+                    return Line::from(spans);
+                }
+            }
+            Line::from(inline_code(line, theme))
+        })
+        .collect()
+}
+
+/// Lines of `doc` with the lines of each paragraph joined, so that they are
+/// wrapped to the panel width instead of at the manual's line breaks.
+fn reflow(doc: &str) -> Vec<String> {
+    let is_block = |line: &str| {
+        line.is_empty()
+            || ["#", "- ", "Input:", "Output:"]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut joinable = false;
+    for line in doc.lines().map(str::trim_end) {
+        match lines.last_mut() {
+            Some(last) if joinable && !is_block(line) => {
+                last.push(' ');
+                last.push_str(line.trim_start());
+            }
+            _ => lines.push(line.to_string()),
+        }
+        joinable = !is_block(line);
+    }
+    lines
+}
+
+/// Spans of `text`, with the parts between backticks styled as code.
+fn inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    text.split('`')
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(i, part)| {
+            if i % 2 == 1 {
+                Span::styled(part.to_string(), theme.doc_code)
+            } else {
+                Span::raw(part.to_string())
+            }
+        })
+        .collect()
 }
 
 fn draw_result(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -326,6 +441,13 @@ fn hints(app: &App) -> Vec<(&Keys, &'static str)> {
             (&k.list.select, "use"),
             (&k.list.back, "back"),
             (&k.list.down, "next"),
+            (&k.global.focus_query, "query"),
+            (&k.global.help, "help"),
+            (&k.global.quit, "quit"),
+        ],
+        Panel::History if app.showing_docs() => vec![
+            (&k.list.down, "scroll"),
+            (&k.list.back, "back"),
             (&k.global.focus_query, "query"),
             (&k.global.help, "help"),
             (&k.global.quit, "quit"),
@@ -449,10 +571,10 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             ],
         ),
         (
-            "Suggestions / History",
+            "Suggestions / History / Docs",
             vec![
-                (&k.list.up, "Previous item"),
-                (&k.list.down, "Next item"),
+                (&k.list.up, "Previous item (Docs: scroll up)"),
+                (&k.list.down, "Next item (Docs: scroll down)"),
                 (&k.list.page_up, "Page up"),
                 (&k.list.page_down, "Page down"),
                 (&k.list.top, "First item"),
@@ -579,4 +701,26 @@ fn draw_menu(frame: &mut Frame, app: &App) {
 /// Messages are shown on one line.
 fn single_line(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_paragraphs_are_reflowed() {
+        let doc = "## `f`\n\nThe function\n`f` does\nthings.\n\n- `jq f`\nInput: `1`\nOutput: `2`";
+        assert_eq!(
+            reflow(doc),
+            vec![
+                "## `f`",
+                "",
+                "The function `f` does things.",
+                "",
+                "- `jq f`",
+                "Input: `1`",
+                "Output: `2`",
+            ]
+        );
+    }
 }

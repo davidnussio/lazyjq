@@ -118,10 +118,12 @@ fn for_each_path(input: &[Value], f: &mut impl FnMut(String)) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SuggestionKind {
     Paths,
     Values,
+    /// jq builtins, offered when no path matches.
+    Functions,
 }
 
 /// Content of the Suggestions panel for the current query.
@@ -169,6 +171,24 @@ impl Suggestions {
         };
         self.items = items;
         self.selected = 0;
+    }
+
+    /// Show jq builtins, each completing the query `head` + name.
+    pub fn set_functions(&mut self, head: String, items: Vec<String>, truncated: bool) {
+        self.kind = SuggestionKind::Functions;
+        self.head = head;
+        self.truncated = truncated;
+        self.note = None;
+        self.items = items;
+        self.selected = 0;
+    }
+
+    /// The builtin whose documentation is shown, when listing functions.
+    pub fn selected_function(&self) -> Option<&str> {
+        match self.kind {
+            SuggestionKind::Functions => self.items.get(self.selected).map(String::as_str),
+            _ => None,
+        }
     }
 
     /// Show values for `request` if they are cached. Returns false when they must be computed.

@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use crate::{
+    builtins,
     config::{keys::is_text_input, Config},
     editor::LineEditor,
     history::History,
@@ -114,6 +115,17 @@ pub struct ResultView {
     pub query: String,
 }
 
+/// Documentation of the selected builtin, shown in place of History while
+/// the Suggestions panel lists functions.
+#[derive(Default)]
+pub struct DocsView {
+    /// Builtin the scroll position belongs to.
+    pub name: String,
+    pub scroll: usize,
+    /// Largest useful scroll position, from the last draw.
+    pub max_scroll: usize,
+}
+
 /// A result left by drilling down into one of its nodes, to come back to.
 pub struct DrillStep {
     pub query: String,
@@ -168,6 +180,7 @@ pub struct App {
     pub suggestions_list: ListState,
     pub history: History,
     pub history_list: ListState,
+    pub docs: DocsView,
     pub toast: Option<Toast>,
     pub evaluating: bool,
     pub spinner: usize,
@@ -231,6 +244,7 @@ impl App {
             suggestions_list: ListState::default(),
             history,
             history_list: ListState::default(),
+            docs: DocsView::default(),
             toast: None,
             evaluating: false,
             spinner: 0,
@@ -490,12 +504,40 @@ impl App {
                 });
             }
         } else {
-            let (items, truncated) = self
-                .paths
-                .matches(text.trim_start(), self.config.completion.max_suggestions);
+            let limit = self.config.completion.max_suggestions;
+            let (items, truncated) = self.paths.matches(text.trim_start(), limit);
+            if items.is_empty() {
+                if let Some((head, functions, truncated)) = builtins::complete(&text, limit) {
+                    if !functions.is_empty() {
+                        self.suggestions.set_functions(head, functions, truncated);
+                        return;
+                    }
+                }
+            }
             self.suggestions
                 .set_paths(items, truncated, !self.paths.is_complete());
         }
+    }
+
+    /// The builtin whose documentation panel 3 shows instead of History:
+    /// the one selected in Suggestions while a function name is being typed or
+    /// the list is browsed, otherwise the one whose arguments are being typed.
+    pub fn docs_function(&self) -> Option<String> {
+        let text = self.editor.text();
+        let enclosing = builtins::enclosing_call(&text);
+        let selected = self.suggestions.selected_function();
+        let typing_name = text.len() > self.suggestions.head.len();
+        let browsing = self.focus == Panel::Suggestions || self.is_previewing();
+        match (selected, enclosing) {
+            (Some(name), Some(_)) if typing_name || browsing => Some(name.to_string()),
+            (_, Some(name)) => Some(name.to_string()),
+            (selected, None) => selected.map(str::to_string),
+        }
+    }
+
+    /// Whether panel 3 shows the documentation of a builtin instead of History.
+    pub fn showing_docs(&self) -> bool {
+        self.docs_function().is_some()
     }
 
     /// The query text changed because of an edit: update everything depending on it.
@@ -773,6 +815,9 @@ impl App {
     }
 
     fn handle_history_key(&mut self, key: &KeyEvent) -> bool {
+        if self.showing_docs() {
+            return self.handle_docs_key(key);
+        }
         let config = self.config.clone();
         let k = &config.keybinds.list;
         let len = self.history.entries().len();
@@ -796,6 +841,21 @@ impl App {
         }
         if k.back.matches(key) {
             self.set_focus(Panel::Query);
+            return true;
+        }
+        false
+    }
+
+    fn handle_docs_key(&mut self, key: &KeyEvent) -> bool {
+        let k = &self.config.keybinds.list;
+        if k.select.matches(key) || k.back.matches(key) {
+            self.set_focus(Panel::Query);
+            return true;
+        }
+        // `list_move` clamps to `len - 1`: positions are scroll offsets.
+        let len = self.docs.max_scroll + 1;
+        if let Some(scroll) = self.list_move(key, self.docs.scroll, len, self.areas.history) {
+            self.docs.scroll = scroll;
             return true;
         }
         false
@@ -1051,6 +1111,14 @@ impl App {
                             s.saturating_sub(SCROLL_STEP)
                         };
                     }
+                    Panel::History if self.showing_docs() => {
+                        let d = &mut self.docs;
+                        d.scroll = if down {
+                            (d.scroll + SCROLL_STEP).min(d.max_scroll)
+                        } else {
+                            d.scroll.saturating_sub(SCROLL_STEP)
+                        };
+                    }
                     Panel::History => {
                         let last = self.history.entries().len().saturating_sub(1);
                         let s = &mut self.history.selected;
@@ -1077,6 +1145,7 @@ impl App {
                             self.suggestions.selected = index;
                         }
                     }
+                    Panel::History if self.showing_docs() => {}
                     Panel::History => {
                         let index = self.history_list.offset() + line;
                         if index < self.history.entries().len() {
@@ -1117,6 +1186,7 @@ async fn evaluate(input: Arc<Vec<Value>>, worker: JqWorker, query: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::suggestions::SuggestionKind;
 
     async fn app(json: &str) -> (App, mpsc::UnboundedReceiver<AppEvent>) {
         let config = Config::load_from("[history]\npersist = false").unwrap();
@@ -1173,6 +1243,47 @@ mod tests {
 
         app.drill_up();
         assert!(app.toast.is_some());
+    }
+
+    #[tokio::test]
+    async fn functions_are_suggested_when_no_path_matches() {
+        let (mut app, _rx) = app(SAMPLE).await;
+        app.paths
+            .spawn_loader(app.input.clone(), 10, || {})
+            .join()
+            .unwrap();
+
+        app.set_query(".users");
+        assert_eq!(app.suggestions.kind, SuggestionKind::Paths);
+        assert!(!app.showing_docs());
+
+        app.set_query(".users[0] | sel");
+        assert_eq!(app.suggestions.kind, SuggestionKind::Functions);
+        assert_eq!(app.suggestions.items, vec!["select"]);
+        assert_eq!(app.suggestions.selected_function(), Some("select"));
+        assert!(app.showing_docs());
+        assert_eq!(
+            app.suggestions.selected_query().as_deref(),
+            Some(".users[0] | select")
+        );
+
+        app.set_query(".users | map(");
+        assert!(app.suggestions.items.len() > 50);
+        // The documentation stays on the function whose arguments are typed...
+        assert_eq!(app.docs_function().as_deref(), Some("map"));
+        app.set_query(".users | map(.name == \"A");
+        assert_eq!(app.docs_function().as_deref(), Some("map"));
+        // ...unless another function name is being typed.
+        app.set_query(".users | map(sel");
+        assert_eq!(app.docs_function().as_deref(), Some("select"));
+        app.set_query(".users | map(select(.n) | len");
+        assert_eq!(app.docs_function().as_deref(), Some("length"));
+        app.set_query(".users | map(.name)");
+        assert_eq!(app.docs_function(), None);
+
+        app.set_query(".nope");
+        assert_eq!(app.suggestions.kind, SuggestionKind::Paths);
+        assert!(!app.showing_docs());
     }
 
     #[tokio::test]

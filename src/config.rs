@@ -113,6 +113,10 @@ pub struct Theme {
     pub warning: Style,
     #[serde(with = "style_serde")]
     pub error: Style,
+    #[serde(with = "style_serde")]
+    pub doc_heading: Style,
+    #[serde(with = "style_serde")]
+    pub doc_code: Style,
 }
 
 #[derive(Deserialize)]

@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 mod app;
 use app::App;
+mod builtins;
 mod config;
 use config::{Config, DEFAULT_CONFIG};
 mod editor;

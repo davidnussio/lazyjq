@@ -35,6 +35,10 @@ need to be installed.
   - Paths of the input (`.users[0].name`) matching the query.
   - Values after a comparison or a string function, e.g.
     `.users[] | select(.name == "Al` or `select(.email | endswith("`.
+  - jq functions when no path matches, e.g. `.users[] | sel` or after `| `:
+    meanwhile panel 3 shows the documentation of the selected function
+    (from the jq manual) in place of the History. While typing the arguments
+    of a function (`select(.age > `), its documentation stays visible.
   - <kbd>Tab</kbd> completes: a single candidate is inserted directly, otherwise
     the candidates are previewed one by one (<kbd>Esc</kbd> restores the query).
 - **Stable result**: while the query is incomplete or invalid, the Result panel
@@ -145,6 +149,8 @@ typing in the query editor.
 | <kbd>Enter</kbd> | Put the item in the query (History: and run it) |
 | <kbd>Esc</kbd> | Back to the query (Suggestions: undo the completion) |
 | <kbd>d</kbd> | Delete the history entry |
+
+While panel 3 shows the documentation of a function, the move keys scroll it.
 
 ### [4] Result
 

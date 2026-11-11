@@ -55,6 +55,9 @@ dim = "fg=darkgrey"
 success = "fg=green"
 warning = "fg=yellow"
 error = "fg=red"
+# Headings and code in the documentation of jq functions
+doc_heading = "attr=bold"
+doc_code = "fg=cyan"
 
 # Query editor
 [editor]
