@@ -25,3 +25,5 @@ install-updater = false
 # GitHub retired the macos-14 image that dist 0.30.4 picks by default for Apple Silicon
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"
+# apt on the ubuntu-22.04 x64 runner can't reach the Ubuntu mirror, so musl-tools fails to install
+x86_64-unknown-linux-musl = "ubuntu-24.04"
