@@ -16,6 +16,15 @@ screen at once and driven from the keyboard. Filters are evaluated with
 
 ![lazyjq showing the result of a query](assets/screenshots/result.png)
 
+## Why lazyjq
+
+I also maintain [jq Playground](https://github.com/davidnussio/vscode-jq-playground)
+([VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=davidnussio.vscode-jq-playground)),
+a VS Code extension to write jq filters with live results and autocomplete.
+I was looking for a TUI to use jq the same interactive way from the terminal,
+without opening an editor: lazyjq is that tool. The jq functions it suggests,
+with their documentation, come from the extension's autocomplete.
+
 ## A quick tour
 
 The examples below explore a Kubernetes Pod manifest,
@@ -266,6 +275,8 @@ set `history.persist = false` to keep it in memory only.
 ## Credits
 
 - [jnv](https://github.com/ynqa/jnv) by ynqa, which lazyjq is forked from
+- [jq Playground](https://github.com/davidnussio/vscode-jq-playground) for the
+  list and the documentation of the jq functions
 - [lazygit](https://github.com/jesseduffield/lazygit) for the interface
 - [jaq](https://github.com/01mf02/jaq) for the `jq` implementation
 - [ratatui](https://ratatui.rs) for the terminal UI
