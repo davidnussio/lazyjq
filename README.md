@@ -98,6 +98,21 @@ brew install davidnussio/tap/lazyjq
 The formula is published to [davidnussio/homebrew-tap](https://github.com/davidnussio/homebrew-tap)
 with every release; update with `brew upgrade lazyjq`.
 
+### Shell installer (macOS and Linux)
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/davidnussio/lazyjq/releases/latest/download/lazyjq-installer.sh | sh
+```
+
+The script downloads the prebuilt binary of the latest release for your
+platform, checks its SHA-256 and installs it to `~/.cargo/bin` (Rust is not
+needed), adding that directory to your `PATH` if it isn't there yet: set
+`LAZYJQ_NO_MODIFY_PATH=1` to leave your shell profile untouched. Run the same
+command again to update.
+
+On Windows, download the `.zip` from the
+[latest release](https://github.com/davidnussio/lazyjq/releases/latest).
+
 ### Cargo
 
 ```bash
