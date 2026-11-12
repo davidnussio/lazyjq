@@ -89,6 +89,15 @@ The whole flow, from `| ma` to the result:
 
 ## Installation
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew install davidnussio/tap/lazyjq
+```
+
+The formula is published to [davidnussio/homebrew-tap](https://github.com/davidnussio/homebrew-tap)
+with every release; update with `brew upgrade lazyjq`.
+
 ### Cargo
 
 ```bash
