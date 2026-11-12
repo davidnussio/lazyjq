@@ -123,6 +123,19 @@ pub struct Prompt {
     /// Text whose confirmation would overwrite an existing file: confirming
     /// the same text again does it.
     overwrite: Option<String>,
+    /// File names offered by the last completion.
+    pub completion: Option<Completion>,
+}
+
+/// File names matching the one being typed in a [`Prompt`].
+pub struct Completion {
+    /// Text before the completed name.
+    base: String,
+    /// Text before going through the candidates, restored when going back.
+    original: String,
+    pub candidates: Vec<String>,
+    /// Candidate put in the text while going through them.
+    pub selected: Option<usize>,
 }
 
 pub enum Popup {
@@ -1080,6 +1093,7 @@ impl App {
             editor: LineEditor::new(&path),
             message: None,
             overwrite: None,
+            completion: None,
         }));
     }
 
@@ -1142,19 +1156,52 @@ impl App {
     fn handle_prompt_key(&mut self, key: &KeyEvent) {
         let config = self.config.clone();
         let k = &config.keybinds.popup;
+        let complete = &config.keybinds.query.complete;
+        let list = &config.keybinds.list;
         // Printable keys are typed, whatever they are bound to.
         let typing = is_text_input(key.code, key.modifiers);
-        if k.close.matches(key) && !typing {
-            self.popup = None;
-            return;
-        }
-        if k.select.matches(key) && !typing {
-            self.confirm_prompt();
-            return;
-        }
         let Some(Popup::Prompt(prompt)) = &mut self.popup else {
             return;
         };
+
+        if let Some(completion) = &prompt.completion {
+            if !typing && k.close.matches(key) {
+                // Back to the text before going through the candidates.
+                if completion.selected.is_some() {
+                    let original = completion.original.clone();
+                    prompt.editor.set_text(&original);
+                }
+                prompt.completion = None;
+                return;
+            }
+            if !typing && k.select.matches(key) && completion.selected.is_some() {
+                // Keep the candidate: Tab then completes inside a directory.
+                prompt.completion = None;
+                return;
+            }
+            if !typing && (complete.matches(key) || list.down.matches(key)) {
+                prompt.cycle(true);
+                return;
+            }
+            if !typing && list.up.matches(key) {
+                prompt.cycle(false);
+                return;
+            }
+        }
+
+        if !typing && k.close.matches(key) {
+            self.popup = None;
+            return;
+        }
+        if !typing && k.select.matches(key) {
+            prompt.completion = None;
+            self.confirm_prompt();
+            return;
+        }
+        if !typing && complete.matches(key) {
+            prompt.complete();
+            return;
+        }
         let before = prompt.editor.text();
         if !edit_line(
             &mut prompt.editor,
@@ -1316,6 +1363,56 @@ impl Prompt {
     fn edited(&mut self) {
         self.message = None;
         self.overwrite = None;
+        self.completion = None;
+    }
+
+    /// Complete the file name being typed: a single match is put in the
+    /// text, several are listed after putting in their common beginning, or
+    /// gone through when there is none to add.
+    fn complete(&mut self) {
+        let text = self.editor.text();
+        let (base, candidates) = save::complete_path(&text);
+        self.message = None;
+        self.overwrite = None;
+        self.completion = None;
+        match candidates.as_slice() {
+            [] => self.message = Some(("No file matches".into(), Severity::Warning)),
+            [only] => self.editor.set_text(&format!("{base}{only}")),
+            _ => {
+                let common = save::common_prefix(&candidates);
+                let typed = &text[base.len()..];
+                let extends = common.chars().count() > typed.chars().count();
+                if extends {
+                    self.editor.set_text(&format!("{base}{common}"));
+                }
+                self.completion = Some(Completion {
+                    base,
+                    original: self.editor.text(),
+                    candidates,
+                    selected: None,
+                });
+                if !extends {
+                    self.cycle(true);
+                }
+            }
+        }
+    }
+
+    /// Put the next (or previous) candidate in the text.
+    fn cycle(&mut self, forward: bool) {
+        let Some(c) = &mut self.completion else {
+            return;
+        };
+        let len = c.candidates.len();
+        let next = match (c.selected, forward) {
+            (None, true) => 0,
+            (None, false) => len - 1,
+            (Some(i), true) => (i + 1) % len,
+            (Some(i), false) => (i + len - 1) % len,
+        };
+        c.selected = Some(next);
+        self.editor
+            .set_text(&format!("{}{}", c.base, c.candidates[next]));
     }
 }
 
@@ -1568,6 +1665,81 @@ mod tests {
         press(&mut app, crossterm::event::KeyCode::Enter);
         until_saved(&mut app, &mut rx).await;
         assert_eq!(app.toast.as_ref().unwrap().severity, Severity::Error);
+    }
+
+    #[tokio::test]
+    async fn completes_the_file_name() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let dir = std::env::temp_dir().join(format!("lazyjq-app-complete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data").join("users.json"), "").unwrap();
+        std::fs::write(dir.join("dump-a.json"), "").unwrap();
+        std::fs::write(dir.join("dump-b.json"), "").unwrap();
+        let base = format!("{}/", dir.display());
+        let text = |app: &App| prompt(app).editor.text();
+
+        let (mut app, _rx) = app(SAMPLE).await;
+        app.open_save_prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, &format!("{base}da"));
+
+        // A single match is completed, into the directory.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}data/"));
+        assert!(prompt(&app).completion.is_none());
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}data/users.json"));
+
+        // Several matches: their common beginning, then each of them.
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, &format!("{base}du"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}dump-"));
+        assert_eq!(prompt(&app).completion.as_ref().unwrap().selected, None);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}dump-a.json"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}dump-b.json"));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(text(&app), format!("{base}dump-a.json"));
+
+        // The matches are listed, the selected one with its own footer.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("dump-a.json  dump-b.json"));
+        assert!(screen.contains("tab: next | enter: choose | esc: back"));
+
+        // Esc undoes going through the matches, without closing the prompt.
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(text(&app), format!("{base}dump-"));
+        assert!(prompt(&app).completion.is_none());
+
+        // With nothing to add, the first Tab already goes through the matches;
+        // Enter keeps the match instead of saving.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}dump-a.json"));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.popup.is_some());
+        assert!(prompt(&app).completion.is_none());
+
+        // No match is reported until the text changes.
+        type_text(&mut app, "zz");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(prompt(&app).message.as_ref().unwrap().1, Severity::Warning);
+        type_text(&mut app, "x");
+        assert!(prompt(&app).message.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

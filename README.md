@@ -196,8 +196,10 @@ typing in the query editor.
 
 Saving asks for the file name. The first time it proposes
 `<input>.result.json` next to the input file (`result.json` when reading stdin),
-then the last file used. An existing file is only overwritten after a second
-<kbd>Enter</kbd>, and the result is written as with `--write-to-stdout`.
+then the last file used. <kbd>Tab</kbd> completes the file name: pressed again
+it goes through the matches (<kbd>Shift + Tab</kbd> back), <kbd>Enter</kbd> keeps
+one and <kbd>Esc</kbd> undoes it. An existing file is only overwritten after a
+second <kbd>Enter</kbd>, and the result is written as with `--write-to-stdout`.
 
 ### [1] Query
 

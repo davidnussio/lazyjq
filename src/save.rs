@@ -42,6 +42,88 @@ fn expand_tilde(text: &str, home: Option<PathBuf>) -> PathBuf {
     }
 }
 
+/// Completions of the file name being typed: the text before its last
+/// component, and the names in that directory starting with that component
+/// (sorted, directories ending with `/`). Hidden files are only listed when
+/// the component starts with `.`; when nothing matches, case is ignored.
+pub fn complete_path(text: &str) -> (String, Vec<String>) {
+    complete_path_in(text, dirs::home_dir())
+}
+
+fn complete_path_in(text: &str, home: Option<PathBuf>) -> (String, Vec<String>) {
+    if text == "~" {
+        return (String::new(), vec!["~/".into()]);
+    }
+    let split = text.rfind('/').map_or(0, |i| i + 1);
+    let (base, prefix) = text.split_at(split);
+    let dir = if base.is_empty() {
+        PathBuf::from(".")
+    } else {
+        expand_tilde(base, home)
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return (base.to_string(), Vec::new());
+    };
+    let entries: Vec<(String, bool)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if name.starts_with('.') && !prefix.starts_with('.') {
+                return None;
+            }
+            // Follows symbolic links, so that a link to a directory completes like one.
+            let is_dir = entry.path().is_dir();
+            Some((name, is_dir))
+        })
+        .collect();
+
+    let matching = |ignore_case: bool| -> Vec<String> {
+        let lower = prefix.to_lowercase();
+        let mut names: Vec<String> = entries
+            .iter()
+            .filter(|(name, _)| {
+                if ignore_case {
+                    name.to_lowercase().starts_with(&lower)
+                } else {
+                    name.starts_with(prefix)
+                }
+            })
+            .map(|(name, is_dir)| {
+                if *is_dir {
+                    format!("{name}/")
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let mut names = matching(false);
+    if names.is_empty() {
+        names = matching(true);
+    }
+    (base.to_string(), names)
+}
+
+/// The longest common beginning of `names`.
+pub fn common_prefix(names: &[String]) -> String {
+    let Some((first, rest)) = names.split_first() else {
+        return String::new();
+    };
+    let mut len = first.len();
+    for name in rest {
+        len = first
+            .char_indices()
+            .zip(name.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map_or(0, |((i, a), _)| i + a.len_utf8())
+            .min(len);
+    }
+    first[..len].to_string()
+}
+
 /// Write `content` to `path` without ever leaving a half written file behind:
 /// the content goes to a temporary file in the same directory, which then
 /// replaces the target. An existing file keeps its permissions, and a symbolic
@@ -129,6 +211,46 @@ mod tests {
         );
         assert_eq!(expand_tilde("out.json", home), PathBuf::from("out.json"));
         assert_eq!(expand_tilde("~/x", None), PathBuf::from("~/x"));
+    }
+
+    #[test]
+    fn completes_file_names() {
+        let dir = temp_dir("complete");
+        fs::write(dir.join("alpha.json"), "").unwrap();
+        fs::write(dir.join("alps.txt"), "").unwrap();
+        fs::write(dir.join(".hidden"), "").unwrap();
+        fs::create_dir(dir.join("beta")).unwrap();
+        let base = format!("{}/", dir.display());
+        let complete = |typed: &str| complete_path_in(&format!("{base}{typed}"), None);
+
+        assert_eq!(
+            complete("al"),
+            (base.clone(), vec!["alpha.json".into(), "alps.txt".into()])
+        );
+        assert_eq!(complete("b").1, ["beta/"]);
+        assert_eq!(complete("").1, ["alpha.json", "alps.txt", "beta/"]);
+        assert_eq!(complete(".").1, [".hidden"]);
+        assert_eq!(complete("AL").1, ["alpha.json", "alps.txt"]);
+        assert!(complete("zzz").1.is_empty());
+        assert!(complete_path_in("/nonexistent-lazyjq/x", None).1.is_empty());
+
+        let home = Some(dir.clone());
+        assert_eq!(
+            complete_path_in("~/be", home.clone()),
+            ("~/".into(), vec!["beta/".into()])
+        );
+        assert_eq!(complete_path_in("~", home).1, ["~/"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn common_prefixes() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(common_prefix(&names(&["alpha.json", "alps.txt"])), "alp");
+        assert_eq!(common_prefix(&names(&["àbc", "àbd"])), "àb");
+        assert_eq!(common_prefix(&names(&["a", "b"])), "");
+        assert_eq!(common_prefix(&names(&["same"])), "same");
+        assert_eq!(common_prefix(&[]), "");
     }
 
     #[test]

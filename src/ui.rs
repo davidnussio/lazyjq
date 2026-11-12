@@ -616,6 +616,18 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                 (&k.result.back, "Back to the query"),
             ],
         ),
+        (
+            "Save prompt",
+            vec![
+                (
+                    &k.query.complete,
+                    "Complete the file name (again: next match)",
+                ),
+                (&k.list.up, "Previous match"),
+                (&k.popup.select, "Save (on a match: keep it)"),
+                (&k.popup.close, "Cancel (on a match: undo it)"),
+            ],
+        ),
     ];
 
     let theme = &app.config.theme;
@@ -707,17 +719,20 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     };
     let config = &app.config;
     let area = centered(frame.area(), 72, 4);
-    let confirm = config.keybinds.popup.select.display().unwrap_or("enter");
-    let close = config.keybinds.popup.close.display().unwrap_or("esc");
-    let block = popup_block(
-        app,
-        prompt.title,
-        format!(
-            " {}: save | {}: cancel ",
-            confirm.to_lowercase(),
-            close.to_lowercase()
-        ),
-    );
+    let key = |keys: &Keys, fallback: &str| keys.display().unwrap_or(fallback).to_lowercase();
+    let complete = key(&config.keybinds.query.complete, "tab");
+    let confirm = key(&config.keybinds.popup.select, "enter");
+    let close = key(&config.keybinds.popup.close, "esc");
+    let choosing = prompt
+        .completion
+        .as_ref()
+        .is_some_and(|c| c.selected.is_some());
+    let footer = if choosing {
+        format!(" {complete}: next | {confirm}: choose | {close}: back ")
+    } else {
+        format!(" {complete}: complete | {confirm}: save | {close}: cancel ")
+    };
+    let block = popup_block(app, prompt.title, footer);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -725,11 +740,17 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     let prompt_width = config.editor.prompt.width();
     let text_width = usize::from(inner.width).saturating_sub(prompt_width);
     let (visible, cursor) = prompt.editor.viewport(text_width);
-    let message = match &prompt.message {
-        Some((text, severity)) => {
+    let message = match (&prompt.completion, &prompt.message) {
+        (Some(completion), _) => candidates_line(
+            &completion.candidates,
+            completion.selected,
+            usize::from(inner.width),
+            &config.theme,
+        ),
+        (None, Some((text, severity))) => {
             Line::styled(single_line(text), severity_style(config, *severity))
         }
-        None => Line::styled(
+        (None, None) => Line::styled(
             format!("Result of {}", single_line(&app.result.query)),
             config.theme.dim,
         ),
@@ -749,6 +770,61 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     }
 }
 
+/// The completion candidates on one line of `width` columns, scrolled to
+/// show the selected one; `…` marks the candidates left out.
+fn candidates_line(
+    names: &[String],
+    selected: Option<usize>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    const GAP: usize = 2;
+    const MORE: &str = "…";
+    let widths: Vec<usize> = names.iter().map(|n| n.width()).collect();
+    // Room for the marker after a candidate followed by others.
+    let after = |i: usize| {
+        if i + 1 < names.len() {
+            GAP + MORE.width()
+        } else {
+            0
+        }
+    };
+    // First candidate shown: the selected one must fit after it.
+    let mut start = 0;
+    if let Some(selected) = selected {
+        let fits = |start: usize| {
+            let before = if start > 0 { MORE.width() + GAP } else { 0 };
+            let names: usize = widths[start..=selected].iter().map(|w| w + GAP).sum();
+            before + names - GAP + after(selected) <= width
+        };
+        while start < selected && !fits(start) {
+            start += 1;
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut used = 0;
+    if start > 0 {
+        spans.push(Span::styled(format!("{MORE}  "), theme.dim));
+        used += MORE.width() + GAP;
+    }
+    for (i, name) in names.iter().enumerate().skip(start) {
+        if used + widths[i] + after(i) > width && Some(i) != selected {
+            spans.push(Span::styled(MORE, theme.dim));
+            break;
+        }
+        let style = if Some(i) == selected {
+            theme.selected_line
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(name.clone(), style));
+        spans.push(Span::raw("  "));
+        used += widths[i] + GAP;
+    }
+    Line::from(spans)
+}
+
 /// Messages are shown on one line.
 fn single_line(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
@@ -757,6 +833,20 @@ fn single_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidates_scroll_to_the_selected_one() {
+        let theme = crate::config::Config::load_from("").unwrap().theme;
+        let names: Vec<String> = ["aaaa", "bbbb", "cccc", "dddd", "eeee"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let line = |selected, width| candidates_line(&names, selected, width, &theme).to_string();
+        assert_eq!(line(None, 80).trim_end(), "aaaa  bbbb  cccc  dddd  eeee");
+        assert_eq!(line(None, 14).trim_end(), "aaaa  bbbb  …");
+        assert_eq!(line(Some(4), 14).trim_end(), "…  dddd  eeee");
+        assert_eq!(line(Some(2), 16).trim_end(), "…  bbbb  cccc  …");
+    }
 
     #[test]
     fn doc_paragraphs_are_reflowed() {

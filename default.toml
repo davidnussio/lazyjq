@@ -196,8 +196,9 @@ copy_menu = ["y"]
 back = ["Esc", "Shift+Up"]
 
 # Popups (help, copy menu, file name prompt)
-# In the file name prompt, printable keys (like "q") are typed and the
-# query editor keys edit the text.
+# In the file name prompt, printable keys (like "q") are typed, the query
+# editor keys edit the text and `complete` completes the file name; while
+# going through the matches, the list keys move between them.
 [keybinds.popup]
 up = ["Up", "k"]
 down = ["Down", "j"]
