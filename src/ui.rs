@@ -411,6 +411,15 @@ fn draw_result(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         return;
     }
+    if app.result.tree.values().is_empty() && app.loading.is_none() {
+        // No input: started without a file, or an empty stream.
+        let text = match config.keybinds.global.open_file.display() {
+            Some(key) => format!("No input: {} opens a file", key.to_lowercase()),
+            None => "No input".to_string(),
+        };
+        frame.render_widget(Paragraph::new(Span::styled(text, config.theme.dim)), inner);
+        return;
+    }
 
     let height = usize::from(inner.height);
     app.result.tree.scroll_into_view(height);

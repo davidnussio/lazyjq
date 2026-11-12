@@ -1183,7 +1183,7 @@ impl App {
     // --- Opening ------------------------------------------------------------
 
     /// Ask for a file to replace the input, starting in the directory of the current one.
-    fn open_file_prompt(&mut self) {
+    pub fn open_file_prompt(&mut self) {
         let dir = self
             .source
             .as_deref()
@@ -2077,6 +2077,47 @@ mod tests {
         type_text(&mut app, &format!("{base}no"));
         press(&mut app, KeyCode::Tab);
         assert_eq!(text(&app), format!("{base}notes.txt"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn starts_without_input() {
+        let dir = temp_dir("no-input");
+        let file = dir.join("data.json");
+        std::fs::write(&file, r#"{"a":1}"#).unwrap();
+
+        // As started by `lazyjq` with no file and no piped input.
+        let (mut app, mut rx) = app("").await;
+        app.open_file_prompt();
+        assert!(screen(&mut app).contains("Open a JSON file"));
+
+        // Without opening anything, the Result panel says how to.
+        press(&mut app, crossterm::event::KeyCode::Esc);
+        assert!(screen(&mut app).contains("No input: ctrl+o opens a file"));
+        app.set_query(".a");
+        app.evaluate_now();
+        settle(&mut app, &mut rx).await;
+        assert!(app.result.tree.values().is_empty());
+
+        open(&mut app, &file);
+        until_opened(&mut app, &mut rx).await;
+        settle(&mut app, &mut rx).await;
+        assert_eq!(**app.result.tree.values(), [serde_json::json!(1)]);
+        assert!(!screen(&mut app).contains("No input"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

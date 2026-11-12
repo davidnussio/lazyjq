@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     sync::Arc,
 };
@@ -47,6 +47,9 @@ Examples:
 - Read from standard input:
         cat data.json | {bin}
 
+- Choose the file in the UI:
+        {bin}
+
 Arguments:
 {positionals}
 
@@ -56,8 +59,8 @@ Options:
 )]
 pub struct Args {
     /// Optional path to a JSON file.
-    /// If not provided or if "-" is specified,
-    /// reads from standard input.
+    /// If "-" is specified, or if not provided and standard input is piped,
+    /// reads from standard input. Otherwise asks for the file to open.
     pub input: Option<PathBuf>,
 
     #[arg(short = 'c', long = "config", help = "Path to the configuration file.")]
@@ -80,9 +83,10 @@ pub struct Args {
     write_to_stdout: bool,
 }
 
-/// Read the input from the given file, or from standard input when it is
-/// missing or `-`.
-fn read_input(args: &Args) -> anyhow::Result<String> {
+/// Read the input from the given file, or from standard input when it is `-`
+/// or when no file is given and standard input is piped. `None` when there is
+/// nothing to read: no file, and standard input is the terminal.
+fn read_input(args: &Args) -> anyhow::Result<Option<String>> {
     let mut ret = String::new();
     match &args.input {
         Some(path) if path != &PathBuf::from("-") => {
@@ -90,11 +94,12 @@ fn read_input(args: &Args) -> anyhow::Result<String> {
                 .map_err(|e| anyhow!("Failed to open {}: {e}", path.display()))?
                 .read_to_string(&mut ret)?;
         }
+        None if io::stdin().is_terminal() => return Ok(None),
         _ => {
             io::stdin().read_to_string(&mut ret)?;
         }
     }
-    Ok(ret)
+    Ok(Some(ret))
 }
 
 /// Write the default configuration to `path` if there is no file there yet.
@@ -144,7 +149,12 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("Invalid configuration file {}: {e}", config_file.display()))?;
 
     let input = read_input(&args)?;
-    let input = Arc::new(json::deserialize(&input, config.json.max_streams)?);
+    let ask_for_file = input.is_none();
+    let input = match input {
+        Some(text) => json::deserialize(&text, config.json.max_streams)?,
+        None => Vec::new(),
+    };
+    let input = Arc::new(input);
 
     // With `--write-to-stdout | next`, the UI must go to the terminal, not to the pipe.
     let mut stdout_redirect = StdoutRedirect::try_new_for_tui(args.write_to_stdout)?;
@@ -154,7 +164,10 @@ async fn main() -> anyhow::Result<()> {
         .input
         .clone()
         .filter(|path| path != &PathBuf::from("-"));
-    let app = App::new(config, input, args.default_filter, source, tx);
+    let mut app = App::new(config, input, args.default_filter, source, tx);
+    if ask_for_file {
+        app.open_file_prompt();
+    }
 
     let app = {
         let mut terminal = ratatui::init();

@@ -155,6 +155,9 @@ cat data.json | lazyjq
 # or
 lazyjq data.json
 
+# or choose the file in the UI
+lazyjq
+
 # start with a filter
 lazyjq --default-filter '.users[0]' data.json
 
@@ -167,7 +170,7 @@ cat data.json | lazyjq --write-to-stdout > result.json
 Usage: lazyjq [OPTIONS] [INPUT]
 
 Arguments:
-  [INPUT]  Optional path to a JSON file. If not provided or if "-" is specified, reads from standard input
+  [INPUT]  Optional path to a JSON file. If "-" is specified, or if not provided and standard input is piped, reads from standard input. Otherwise asks for the file to open
 
 Options:
   -c, --config <CONFIG_FILE>             Path to the configuration file.
