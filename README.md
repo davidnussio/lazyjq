@@ -2,29 +2,62 @@
 
 [![ci](https://github.com/davidnussio/lazyjq/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/davidnussio/lazyjq/actions/workflows/ci.yml)
 
+> [!NOTE]
+> **lazyjq is a fork of [jnv](https://github.com/ynqa/jnv) by
+> [ynqa](https://github.com/ynqa).** It keeps jnv's idea, an interactive JSON
+> viewer driven by `jq` filters, and rebuilds the interface around panels like
+> lazygit. Thanks to ynqa for the original project.
+
 *lazyjq* is a terminal UI to explore JSON with `jq`, laid out like
 [lazygit](https://github.com/jesseduffield/lazygit): a query editor, side
 panels with suggestions and history, and the result in the main panel, all on
-screen at once and driven from the keyboard.
+screen at once and driven from the keyboard. Filters are evaluated with
+[jaq](https://github.com/01mf02/jaq), so `jq` doesn't need to be installed.
 
-```text
-╭[1] Query───────────────────────────────────────────────────────────────╮
-│❯ .users[] | select(.city == "Lugano")                                  │
-╰────────────────────────────────────────────────────────────────────────╯
-╭[2] Suggestions · paths───╮╭[4] Result · 1 value───────────────────────╮
-│.users                    ││{                                          │
-│.users[0]                 ││  "name": "Carla",                         │
-╰──────────────── 1 of 24 ─╯│  "age": 42,                               │
-╭[3] History───────────────╮│  "tags": […], 1 item                      │
-│.users | length           ││}                                          │
-│.meta                     ││                                           │
-╰───────────────── 1 of 2 ─╯╰─────────────────────────────── row 1 of 8 ╯
- fold: enter | drill down: f | copy: y | expand all: e | query: 1 | help: ?
+![lazyjq showing the result of a query](assets/screenshots/result.png)
+
+## A quick tour
+
+The examples below explore a Kubernetes Pod manifest,
+[assets/tapes/demo.json](assets/tapes/demo.json). Try them yourself with:
+
+```bash
+lazyjq assets/tapes/demo.json
 ```
 
-lazyjq started as a fork of [jnv](https://github.com/ynqa/jnv) by ynqa and
-evaluates filters with [jaq](https://github.com/01mf02/jaq), so `jq` doesn't
-need to be installed.
+### Paths of the input
+
+While you type a path, the Suggestions panel lists the paths of the input that
+start with it. <kbd>Tab</kbd> completes, and the Result panel keeps the last
+valid result while the query is incomplete.
+
+![Path suggestions for .spec.containers[0].livenessProbe.](assets/screenshots/paths.png)
+
+### Values
+
+After a comparison or a string function, the suggestions are the values
+found at that position: here the names of the volumes for
+`.spec.volumes[] | select(.name == "`.
+
+![Value suggestions inside select()](assets/screenshots/values.png)
+
+### jq functions and their documentation
+
+When no path matches, the Suggestions panel lists the jq functions that start
+with what you are typing, and panel 3 shows the documentation of the selected
+one (from the jq manual) in place of the History.
+
+![Function suggestions for "ma" with the documentation of map](assets/screenshots/functions.png)
+
+While you type the arguments of a function, its documentation stays visible:
+in `map(select(startswith("--data` it follows the innermost call,
+`startswith`, while the Suggestions panel offers the matching values.
+
+![Documentation of startswith while typing its argument](assets/screenshots/function-arguments.png)
+
+The whole flow, from `| ma` to the result:
+
+![Typing a query with the documentation of map, select and startswith](assets/screenshots/functions.gif)
 
 ## Features
 

@@ -1,10 +1,10 @@
 # Run from the repository root after `cargo build --locked`:
-#   vhs tapes/demo.tape
+#   vhs assets/tapes/demo.tape
 # Clean dark background noise, reduce the palette, then optimize similar frames:
-#   ffmpeg -i tapes/demo.gif -filter_complex '[0:v]fps=12,format=rgba,colorkey=0x000000:0.2:0[fg];color=c=0x1e1f29:s=1200x720:r=12[bg];[bg][fg]overlay=shortest=1,split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle' -loop 0 tapes/demo.palette.gif
-#   magick tapes/demo.palette.gif -fuzz 3% -layers Optimize tapes/demo.gif
-#   rm tapes/demo.palette.gif
-Output tapes/demo.gif
+#   ffmpeg -i assets/tapes/demo.gif -filter_complex '[0:v]fps=12,format=rgba,colorkey=0x000000:0.2:0[fg];color=c=0x1e1f29:s=1200x720:r=12[bg];[bg][fg]overlay=shortest=1,split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle' -loop 0 assets/tapes/demo.palette.gif
+#   magick assets/tapes/demo.palette.gif -fuzz 3% -layers Optimize assets/tapes/demo.gif
+#   rm assets/tapes/demo.palette.gif
+Output assets/tapes/demo.gif
 
 Require cat
 Require ./target/debug/lazyjq
@@ -30,7 +30,7 @@ Enter
 Sleep 500ms
 Show
 
-Type "cat tapes/demo.json | lazyjq -c tapes/demo.toml"
+Type "cat assets/tapes/demo.json | lazyjq -c assets/tapes/demo.toml"
 Enter
 Sleep 1500ms
 
