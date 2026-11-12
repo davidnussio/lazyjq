@@ -104,6 +104,12 @@ persist = true
 # Maximum number of queries kept
 max_entries = 200
 
+# Opening a file (in place of the input)
+[open]
+# Only the files with these extensions (and directories) are offered when
+# completing the file name; `toggle_all_files` offers every file
+extensions = ["json", "jsonl", "ndjson", "geojson"]
+
 # Application reactivity settings
 [reactivity_control]
 # Delay after the last keystroke before the query is evaluated
@@ -206,3 +212,5 @@ up = ["Up", "k"]
 down = ["Down", "j"]
 select = ["Enter"]
 close = ["Esc", "q"]
+# In the open prompt: complete every file name, not only JSON files (and back)
+toggle_all_files = ["Ctrl+T"]

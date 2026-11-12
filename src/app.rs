@@ -137,6 +137,11 @@ pub struct Prompt {
     overwrite: Option<String>,
     /// File names offered by the last completion.
     pub completion: Option<Completion>,
+    /// Text the last completion started from, completed again when the
+    /// files offered change.
+    completed_from: Option<String>,
+    /// Open prompt: complete every file, not only the configured extensions.
+    pub all_files: bool,
 }
 
 /// File names matching the one being typed in a [`Prompt`].
@@ -1160,6 +1165,8 @@ impl App {
             message: None,
             overwrite: None,
             completion: None,
+            completed_from: None,
+            all_files: false,
         }));
     }
 
@@ -1192,6 +1199,8 @@ impl App {
             message: None,
             overwrite: None,
             completion: None,
+            completed_from: None,
+            all_files: false,
         }));
     }
 
@@ -1329,6 +1338,19 @@ impl App {
             return;
         };
 
+        if !typing && k.toggle_all_files.matches(key) && prompt.action == PromptAction::OpenFile {
+            prompt.all_files = !prompt.all_files;
+            // Complete again, with the other files.
+            match prompt.completed_from.clone() {
+                Some(text) => {
+                    prompt.editor.set_text(&text);
+                    prompt.complete(&config);
+                }
+                None => prompt.message = None,
+            }
+            return;
+        }
+
         if let Some(completion) = &prompt.completion {
             if !typing && k.close.matches(key) {
                 // Back to the text before going through the candidates.
@@ -1342,6 +1364,7 @@ impl App {
             if !typing && k.select.matches(key) && completion.selected.is_some() {
                 // Keep the candidate: Tab then completes inside a directory.
                 prompt.completion = None;
+                prompt.completed_from = None;
                 return;
             }
             if !typing && (complete.matches(key) || list.down.matches(key)) {
@@ -1364,7 +1387,7 @@ impl App {
             return;
         }
         if !typing && complete.matches(key) {
-            prompt.complete();
+            prompt.complete(&config);
             return;
         }
         let before = prompt.editor.text();
@@ -1539,18 +1562,40 @@ impl Prompt {
         self.message = None;
         self.overwrite = None;
         self.completion = None;
+        self.completed_from = None;
+    }
+
+    /// Extensions of the files offered by the completion, `None` for all files.
+    pub fn extensions<'a>(&self, config: &'a Config) -> Option<&'a [String]> {
+        let filtered = self.action == PromptAction::OpenFile && !self.all_files;
+        filtered.then_some(config.open.extensions.as_slice())
     }
 
     /// Complete the file name being typed: a single match is put in the
     /// text, several are listed after putting in their common beginning, or
     /// gone through when there is none to add.
-    fn complete(&mut self) {
+    fn complete(&mut self, config: &Config) {
         let text = self.editor.text();
-        let (base, candidates) = save::complete_path(&text);
+        let save::PathCompletion {
+            base,
+            names: candidates,
+            filtered,
+        } = save::complete_path(&text, self.extensions(config));
         self.message = None;
         self.overwrite = None;
         self.completion = None;
+        self.completed_from = Some(text.clone());
         match candidates.as_slice() {
+            [] if filtered > 0 => {
+                let toggle = config
+                    .keybinds
+                    .popup
+                    .toggle_all_files
+                    .display()
+                    .map(|key| format!(" ({}: all files)", key.to_lowercase()))
+                    .unwrap_or_default();
+                self.message = Some((format!("No JSON file matches{toggle}"), Severity::Warning));
+            }
             [] => self.message = Some(("No file matches".into(), Severity::Warning)),
             [only] => self.editor.set_text(&format!("{base}{only}")),
             _ => {
@@ -1980,6 +2025,58 @@ mod tests {
         // The next prompt starts in the directory of the file.
         app.open_file_prompt();
         assert_eq!(prompt(&app).editor.text(), format!("{}/", dir.display()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn open_completes_json_files_unless_toggled() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let dir = temp_dir("open-complete");
+        std::fs::write(dir.join("data.json"), "").unwrap();
+        std::fs::write(dir.join("data.csv"), "").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        std::fs::create_dir(dir.join("dumps")).unwrap();
+        let base = format!("{}/", dir.display());
+        let text = |app: &App| prompt(app).editor.text();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+        let (mut app, _rx) = app(SAMPLE).await;
+        app.open_file_prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, &format!("{base}d"));
+
+        // JSON files and directories only.
+        press(&mut app, KeyCode::Tab);
+        let completion = prompt(&app).completion.as_ref().unwrap();
+        assert_eq!(completion.candidates, ["data.json", "dumps/"]);
+        assert_eq!(text(&app), format!("{base}data.json"));
+
+        // All files: completed again from the text typed.
+        app.handle_key(ctrl_t);
+        assert!(prompt(&app).all_files);
+        let completion = prompt(&app).completion.as_ref().unwrap();
+        assert_eq!(completion.candidates, ["data.csv", "data.json", "dumps/"]);
+        assert_eq!(text(&app), format!("{base}data.csv"));
+
+        // Only other files match: the message tells how to see them.
+        app.handle_key(ctrl_t);
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, &format!("{base}no"));
+        press(&mut app, KeyCode::Tab);
+        let (message, _) = prompt(&app).message.as_ref().unwrap();
+        assert!(message.contains("ctrl+t: all files"), "{message}");
+        app.handle_key(ctrl_t);
+        assert_eq!(text(&app), format!("{base}notes.txt"));
+
+        // Saving offers every file.
+        press(&mut app, KeyCode::Esc);
+        app.open_save_prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, &format!("{base}no"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(text(&app), format!("{base}notes.txt"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

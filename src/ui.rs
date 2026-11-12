@@ -25,7 +25,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, Areas, Panel, Popup, Severity},
+    app::{App, Areas, Panel, Popup, PromptAction, Severity},
     builtins,
     config::{Config, Keys, Theme},
     suggestions::SuggestionKind,
@@ -634,6 +634,10 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                 (&k.list.up, "Previous match"),
                 (&k.popup.select, "Open / save (on a match: keep it)"),
                 (&k.popup.close, "Cancel (on a match: undo it)"),
+                (
+                    &k.popup.toggle_all_files,
+                    "Open: complete all files / JSON files only",
+                ),
             ],
         ),
     ];
@@ -735,11 +739,26 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
         .completion
         .as_ref()
         .is_some_and(|c| c.selected.is_some());
+    // Open prompt: the key switching between JSON files and all files.
+    let toggle = match (
+        prompt.action,
+        config.keybinds.popup.toggle_all_files.display(),
+    ) {
+        (PromptAction::OpenFile, Some(toggle)) => {
+            let other = if prompt.all_files {
+                "JSON only"
+            } else {
+                "all files"
+            };
+            format!("{}: {other} | ", toggle.to_lowercase())
+        }
+        _ => String::new(),
+    };
     let footer = if choosing {
-        format!(" {complete}: next | {confirm}: choose | {close}: back ")
+        format!(" {complete}: next | {toggle}{confirm}: choose | {close}: back ")
     } else {
         let verb = prompt.action.verb();
-        format!(" {complete}: complete | {confirm}: {verb} | {close}: cancel ")
+        format!(" {complete}: complete | {toggle}{confirm}: {verb} | {close}: cancel ")
     };
     let block = popup_block(app, prompt.title, footer);
     let inner = block.inner(area);
@@ -759,10 +778,20 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
         (None, Some((text, severity))) => {
             Line::styled(single_line(text), severity_style(config, *severity))
         }
-        (None, None) => Line::styled(
-            format!("Result of {}", single_line(&app.result.query)),
-            config.theme.dim,
-        ),
+        (None, None) => {
+            let text = match (prompt.action, prompt.extensions(config)) {
+                (PromptAction::SaveResult, _) => {
+                    format!("Result of {}", single_line(&app.result.query))
+                }
+                (PromptAction::OpenFile, Some(extensions)) if !extensions.is_empty() => {
+                    let extensions: Vec<String> =
+                        extensions.iter().map(|e| format!(".{e}")).collect();
+                    format!("Completing {} files", extensions.join(" "))
+                }
+                (PromptAction::OpenFile, _) => "Completing all files".to_string(),
+            };
+            Line::styled(text, config.theme.dim)
+        }
     };
     let lines = vec![
         Line::from(vec![

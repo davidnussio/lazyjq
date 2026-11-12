@@ -26,6 +26,7 @@ pub struct Config {
     pub json: JsonConfig,
     pub completion: CompletionConfig,
     pub history: HistoryConfig,
+    pub open: OpenConfig,
     pub keybinds: Keybinds,
 }
 
@@ -210,6 +211,12 @@ pub struct HistoryConfig {
 }
 
 #[derive(Deserialize)]
+pub struct OpenConfig {
+    /// Extensions of the files offered when completing a file name to open.
+    pub extensions: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub struct Keybinds {
     pub global: GlobalKeybinds,
     pub query: QueryKeybinds,
@@ -294,6 +301,7 @@ pub struct PopupKeybinds {
     pub down: Keys,
     pub select: Keys,
     pub close: Keys,
+    pub toggle_all_files: Keys,
 }
 
 #[cfg(test)]

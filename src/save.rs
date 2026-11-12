@@ -42,27 +42,50 @@ fn expand_tilde(text: &str, home: Option<PathBuf>) -> PathBuf {
     }
 }
 
-/// Completions of the file name being typed: the text before its last
-/// component, and the names in that directory starting with that component
-/// (sorted, directories ending with `/`). Hidden files are only listed when
-/// the component starts with `.`; when nothing matches, case is ignored.
-pub fn complete_path(text: &str) -> (String, Vec<String>) {
-    complete_path_in(text, dirs::home_dir())
+/// Completions of the file name being typed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PathCompletion {
+    /// The text before the name being completed (its directory).
+    pub base: String,
+    /// Names in that directory starting with the name typed, sorted;
+    /// directories end with `/`.
+    pub names: Vec<String>,
+    /// Files that match too but were left out because of their extension.
+    pub filtered: usize,
 }
 
-fn complete_path_in(text: &str, home: Option<PathBuf>) -> (String, Vec<String>) {
+/// Complete the last component of `text`. Hidden files are only listed when
+/// it starts with `.`; when nothing matches, case is ignored. With
+/// `extensions`, only the files with one of them (any case) are listed,
+/// besides directories.
+pub fn complete_path(text: &str, extensions: Option<&[String]>) -> PathCompletion {
+    complete_path_in(text, extensions, dirs::home_dir())
+}
+
+fn complete_path_in(
+    text: &str,
+    extensions: Option<&[String]>,
+    home: Option<PathBuf>,
+) -> PathCompletion {
     if text == "~" {
-        return (String::new(), vec!["~/".into()]);
+        return PathCompletion {
+            names: vec!["~/".into()],
+            ..Default::default()
+        };
     }
     let split = text.rfind('/').map_or(0, |i| i + 1);
     let (base, prefix) = text.split_at(split);
+    let mut completion = PathCompletion {
+        base: base.to_string(),
+        ..Default::default()
+    };
     let dir = if base.is_empty() {
         PathBuf::from(".")
     } else {
         expand_tilde(base, home)
     };
     let Ok(entries) = fs::read_dir(&dir) else {
-        return (base.to_string(), Vec::new());
+        return completion;
     };
     let entries: Vec<(String, bool)> = entries
         .flatten()
@@ -77,33 +100,35 @@ fn complete_path_in(text: &str, home: Option<PathBuf>) -> (String, Vec<String>) 
         })
         .collect();
 
-    let matching = |ignore_case: bool| -> Vec<String> {
-        let lower = prefix.to_lowercase();
-        let mut names: Vec<String> = entries
-            .iter()
-            .filter(|(name, _)| {
-                if ignore_case {
-                    name.to_lowercase().starts_with(&lower)
-                } else {
-                    name.starts_with(prefix)
-                }
-            })
-            .map(|(name, is_dir)| {
-                if *is_dir {
-                    format!("{name}/")
-                } else {
-                    name.clone()
-                }
-            })
-            .collect();
-        names.sort();
-        names
+    let lower = prefix.to_lowercase();
+    let starts = |name: &str, ignore_case: bool| {
+        if ignore_case {
+            name.to_lowercase().starts_with(&lower)
+        } else {
+            name.starts_with(prefix)
+        }
     };
-    let mut names = matching(false);
-    if names.is_empty() {
-        names = matching(true);
+    let ignore_case = !entries.iter().any(|(name, _)| starts(name, false));
+    let wanted = |name: &str| {
+        let Some(extensions) = extensions.filter(|e| !e.is_empty()) else {
+            return true;
+        };
+        Path::new(name)
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .is_some_and(|ext| extensions.iter().any(|e| e.to_lowercase() == ext))
+    };
+    for (name, is_dir) in entries.iter().filter(|(name, _)| starts(name, ignore_case)) {
+        if *is_dir {
+            completion.names.push(format!("{name}/"));
+        } else if wanted(name) {
+            completion.names.push(name.clone());
+        } else {
+            completion.filtered += 1;
+        }
     }
-    (base.to_string(), names)
+    completion.names.sort();
+    completion
 }
 
 /// The longest common beginning of `names`.
@@ -221,25 +246,57 @@ mod tests {
         fs::write(dir.join(".hidden"), "").unwrap();
         fs::create_dir(dir.join("beta")).unwrap();
         let base = format!("{}/", dir.display());
-        let complete = |typed: &str| complete_path_in(&format!("{base}{typed}"), None);
+        let complete = |typed: &str| complete_path_in(&format!("{base}{typed}"), None, None);
 
         assert_eq!(
             complete("al"),
-            (base.clone(), vec!["alpha.json".into(), "alps.txt".into()])
+            PathCompletion {
+                base: base.clone(),
+                names: vec!["alpha.json".into(), "alps.txt".into()],
+                filtered: 0,
+            }
         );
-        assert_eq!(complete("b").1, ["beta/"]);
-        assert_eq!(complete("").1, ["alpha.json", "alps.txt", "beta/"]);
-        assert_eq!(complete(".").1, [".hidden"]);
-        assert_eq!(complete("AL").1, ["alpha.json", "alps.txt"]);
-        assert!(complete("zzz").1.is_empty());
-        assert!(complete_path_in("/nonexistent-lazyjq/x", None).1.is_empty());
+        assert_eq!(complete("b").names, ["beta/"]);
+        assert_eq!(complete("").names, ["alpha.json", "alps.txt", "beta/"]);
+        assert_eq!(complete(".").names, [".hidden"]);
+        assert_eq!(complete("AL").names, ["alpha.json", "alps.txt"]);
+        assert!(complete("zzz").names.is_empty());
+        assert!(complete_path_in("/nonexistent-lazyjq/x", None, None)
+            .names
+            .is_empty());
 
         let home = Some(dir.clone());
+        let tilde = complete_path_in("~/be", None, home.clone());
         assert_eq!(
-            complete_path_in("~/be", home.clone()),
-            ("~/".into(), vec!["beta/".into()])
+            (tilde.base.as_str(), tilde.names),
+            ("~/", vec!["beta/".into()])
         );
-        assert_eq!(complete_path_in("~", home).1, ["~/"]);
+        assert_eq!(complete_path_in("~", None, home).names, ["~/"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn completes_only_the_given_extensions() {
+        let dir = temp_dir("extensions");
+        fs::write(dir.join("a.json"), "").unwrap();
+        fs::write(dir.join("b.JSONL"), "").unwrap();
+        fs::write(dir.join("c.txt"), "").unwrap();
+        fs::write(dir.join("Makefile"), "").unwrap();
+        fs::create_dir(dir.join("d.txt")).unwrap();
+        let base = format!("{}/", dir.display());
+        let json = ["json".to_string(), "jsonl".to_string()];
+        let complete = |typed: &str, extensions: Option<&[String]>| {
+            complete_path_in(&format!("{base}{typed}"), extensions, None)
+        };
+
+        let only_json = complete("", Some(&json));
+        assert_eq!(only_json.names, ["a.json", "b.JSONL", "d.txt/"]);
+        assert_eq!(only_json.filtered, 2);
+        assert_eq!(complete("c", Some(&json)).filtered, 1);
+        assert!(complete("c", Some(&json)).names.is_empty());
+        assert_eq!(complete("", None).names.len(), 5);
+        // No extension given: no filter.
+        assert_eq!(complete("", Some(&[])).names.len(), 5);
         let _ = fs::remove_dir_all(dir);
     }
 

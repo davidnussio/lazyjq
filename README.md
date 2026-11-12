@@ -199,7 +199,9 @@ typing in the query editor.
 
 Opening a file asks for its name, starting in the directory of the current
 one. The file replaces the input (stdin included): the query you typed is run
-again on it, while the history is kept.
+again on it, while the history is kept. Completing the name offers only JSON
+files (`.json`, `.jsonl`, `.ndjson`, `.geojson`, see `open.extensions`) and
+directories: <kbd>Ctrl + T</kbd> switches to all files and back.
 
 Saving asks for the file name. The first time it proposes
 `<input>.result.json` next to the input file (`result.json` when reading stdin),
