@@ -107,6 +107,11 @@ impl JqWorker {
         rx.await.ok().flatten()
     }
 
+    /// Make the filter being evaluated (or waiting) stop, as if superseded.
+    pub fn cancel(&self) {
+        self.latest_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Collect the distinct scalar values produced by `query` (JSON encoded, sorted).
     pub async fn scalar_values(&self, query: String, limit: usize) -> anyhow::Result<Vec<String>> {
         let (reply, rx) = oneshot::channel();

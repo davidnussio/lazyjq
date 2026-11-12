@@ -94,6 +94,8 @@ The whole flow, from `| ma` to the result:
 - Fast on large inputs: the input is converted for jq once, evaluations run on
   a dedicated thread and are cancelled when superseded.
 - Input from a file or stdin, one or more JSON values (e.g. [JSON Lines](https://jsonlines.org/)).
+- Open another file without leaving the UI (<kbd>Ctrl + O</kbd>): the query is
+  applied to it, handy to run the same filter on several files.
 - Save the result to a file without leaving the UI (<kbd>Ctrl + S</kbd>).
 - Configurable layout, colors and keybindings (TOML).
 
@@ -191,15 +193,22 @@ typing in the query editor.
 | <kbd>/</kbd>, <kbd>i</kbd> | Focus the query editor |
 | <kbd>←</kbd>, <kbd>→</kbd> | Previous / next panel |
 | <kbd>Ctrl + Q</kbd> | Copy the query |
-| <kbd>Ctrl + O</kbd> | Copy the result |
+| <kbd>Ctrl + Y</kbd> | Copy the result |
 | <kbd>Ctrl + S</kbd> | Save the result to a file |
+| <kbd>Ctrl + O</kbd> | Open another file, keeping the query |
+
+Opening a file asks for its name, starting in the directory of the current
+one. The file replaces the input (stdin included): the query you typed is run
+again on it, while the history is kept.
 
 Saving asks for the file name. The first time it proposes
 `<input>.result.json` next to the input file (`result.json` when reading stdin),
-then the last file used. <kbd>Tab</kbd> completes the file name: pressed again
-it goes through the matches (<kbd>Shift + Tab</kbd> back), <kbd>Enter</kbd> keeps
-one and <kbd>Esc</kbd> undoes it. An existing file is only overwritten after a
-second <kbd>Enter</kbd>, and the result is written as with `--write-to-stdout`.
+then the last file used. An existing file is only overwritten after a second
+<kbd>Enter</kbd>, and the result is written as with `--write-to-stdout`.
+
+In both prompts <kbd>Tab</kbd> completes the file name: pressed again it goes
+through the matches (<kbd>Shift + Tab</kbd> back), <kbd>Enter</kbd> keeps one
+and <kbd>Esc</kbd> undoes it.
 
 ### [1] Query
 
@@ -272,6 +281,13 @@ See [default.toml](./default.toml) for every setting (layout, colors, JSON
 styles, suggestions, history and keybindings) with its documentation. Styles
 use the [termcfg notation](https://github.com/ynqa/termcfg/blob/main/Notations.md),
 e.g. `"fg=blue,attr=bold"`.
+
+A key you bind yourself wins over the default bindings of other actions. A
+configuration file created by lazyjq 0.3.0 or earlier binds
+<kbd>Ctrl + O</kbd> to `copy_result`, so <kbd>Ctrl + O</kbd> keeps copying the
+result and opening a file has no key: change that line to
+`copy_result = ["Ctrl+Y"]` (or delete it) to open files with
+<kbd>Ctrl + O</kbd>.
 
 The query history is stored in the data directory
 (`~/.local/share/lazyjq/history` on Linux,

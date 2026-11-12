@@ -4,7 +4,7 @@
 
 use std::{
     collections::BTreeSet,
-    ops::Bound,
+    ops::{Bound, ControlFlow},
     sync::{Arc, Mutex},
 };
 
@@ -40,7 +40,8 @@ pub struct PathIndex(Arc<Mutex<PathStore>>);
 
 impl PathIndex {
     /// Extract all paths of `input` on a background thread, publishing them in chunks.
-    /// `on_progress` is called after each chunk.
+    /// `on_progress` is called after each chunk. The thread stops early once
+    /// the index is no longer used (e.g. another file was opened).
     pub fn spawn_loader(
         &self,
         input: Arc<Vec<Value>>,
@@ -56,15 +57,22 @@ impl PathIndex {
                 store.paths.extend(batch.drain(..));
                 store.complete = complete;
             };
-            for_each_path(&input, &mut |path| {
+            let walked = for_each_path(&input, &mut |path| {
                 batch.push(sort_key(&path));
                 if batch.len() >= chunk_size {
+                    // Only this thread still holds the index: nobody will read it.
+                    if Arc::strong_count(&index.0) == 1 {
+                        return ControlFlow::Break(());
+                    }
                     flush(&mut batch, false);
                     on_progress();
                 }
+                ControlFlow::Continue(())
             });
-            flush(&mut batch, true);
-            on_progress();
+            if walked.is_continue() {
+                flush(&mut batch, true);
+                on_progress();
+            }
         })
     }
 
@@ -90,32 +98,44 @@ impl PathIndex {
     }
 }
 
-/// Call `f` with the jq path of every node of `input` (`.`, `.users`, `.users[0]`, ...).
-fn for_each_path(input: &[Value], f: &mut impl FnMut(String)) {
-    fn walk(value: &Value, segments: &mut Vec<Segment>, f: &mut impl FnMut(String)) {
-        f(path_to_filter(segments));
+/// Call `f` with the jq path of every node of `input` (`.`, `.users`, `.users[0]`, ...),
+/// until it breaks.
+fn for_each_path(
+    input: &[Value],
+    f: &mut impl FnMut(String) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    fn walk(
+        value: &Value,
+        segments: &mut Vec<Segment>,
+        f: &mut impl FnMut(String) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        f(path_to_filter(segments))?;
         match value {
             Value::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
                     segments.push(Segment::Index(i));
-                    walk(item, segments, f);
+                    let flow = walk(item, segments, f);
                     segments.pop();
+                    flow?;
                 }
             }
             Value::Object(map) => {
                 for (name, item) in map {
                     segments.push(Segment::Name(name.clone()));
-                    walk(item, segments, f);
+                    let flow = walk(item, segments, f);
                     segments.pop();
+                    flow?;
                 }
             }
             _ => {}
         }
+        ControlFlow::Continue(())
     }
     let mut segments = Vec::new();
     for value in input {
-        walk(value, &mut segments, f);
+        walk(value, &mut segments, f)?;
     }
+    ControlFlow::Continue(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,6 +295,22 @@ mod tests {
             vec![".", ".\"if\"", ".a", ".a.\"b c\"", ".a.\"b c\"[0]"]
         );
         assert_eq!(index.matches(".a", 1), (vec![".a".to_string()], true));
+    }
+
+    #[test]
+    fn loader_stops_when_the_index_is_dropped() {
+        let items: Vec<i32> = (0..10_000).collect();
+        let input = vec![serde_json::json!({ "xs": items })];
+        let index = PathIndex::default();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let loader = index.spawn_loader(Arc::new(input), 10, move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        drop(index);
+        loader.join().unwrap();
+        // Stopped at the first chunk instead of publishing ~1000 of them.
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) < 1000);
     }
 
     #[test]

@@ -28,6 +28,7 @@ use crate::{
     editor::LineEditor,
     history::History,
     jq_worker::JqWorker,
+    json,
     json_tree::{formatted_values, path_to_filter, pretty, JsonTree},
     save,
     suggestions::{PathIndex, Suggestions},
@@ -111,6 +112,17 @@ pub struct Menu {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptAction {
     SaveResult,
+    OpenFile,
+}
+
+impl PromptAction {
+    /// What confirming does, for the hints.
+    pub fn verb(self) -> &'static str {
+        match self {
+            PromptAction::SaveResult => "save",
+            PromptAction::OpenFile => "open",
+        }
+    }
 }
 
 /// A popup asking for one line of text, e.g. a file name.
@@ -186,15 +198,30 @@ pub enum AppEvent {
         outcome: Outcome,
     },
     Values {
+        /// [`App::input_epoch`] the values were computed for.
+        epoch: u64,
         source_query: String,
         result: anyhow::Result<Vec<String>>,
     },
     PathsProgress,
+    Opened {
+        /// Request the file was read for, see [`App::load_id`].
+        id: u64,
+        path: PathBuf,
+        result: anyhow::Result<Loaded>,
+    },
     Saved {
         path: PathBuf,
         /// Number of bytes written.
         result: std::io::Result<usize>,
     },
+}
+
+/// A file read and parsed in the background, ready to replace the input.
+pub struct Loaded {
+    input: Arc<Vec<Value>>,
+    tree: JsonTree,
+    bytes: usize,
 }
 
 /// Screen areas from the last draw, used for mouse handling and paging.
@@ -229,6 +256,8 @@ pub struct App {
     pub paths: PathIndex,
     /// Results to go back to, one per drill-down (most recent last).
     pub drill_stack: Vec<DrillStep>,
+    /// File being opened in the background.
+    pub loading: Option<PathBuf>,
 
     input: Arc<Vec<Value>>,
     worker: JqWorker,
@@ -244,7 +273,12 @@ pub struct App {
     input_tree: Option<JsonTree>,
     values_in_flight: Option<String>,
     /// The input file, `None` for stdin.
-    source: Option<PathBuf>,
+    pub source: Option<PathBuf>,
+    /// Incremented each time another file replaces the input, so that
+    /// background results computed for the previous one are ignored.
+    input_epoch: u64,
+    /// Last request to open a file: only its result is applied.
+    load_id: u64,
     /// File name last confirmed in the save prompt, proposed again next time.
     last_save_path: Option<String>,
     quit: bool,
@@ -267,14 +301,7 @@ impl App {
         let history_file = config.history.persist.then(History::default_file).flatten();
         let history = History::load(history_file, config.history.max_entries);
         let worker = JqWorker::spawn(input.clone());
-
-        let paths = PathIndex::default();
-        {
-            let tx = tx.clone();
-            paths.spawn_loader(input.clone(), PATH_LOAD_CHUNK, move || {
-                let _ = tx.send(AppEvent::PathsProgress);
-            });
-        }
+        let paths = index_paths(&input, &tx);
 
         let mut app = Self {
             focus: Panel::Query,
@@ -297,6 +324,7 @@ impl App {
             areas: Areas::default(),
             paths,
             drill_stack: Vec::new(),
+            loading: None,
             input,
             worker,
             tx,
@@ -307,6 +335,8 @@ impl App {
             input_tree: None,
             values_in_flight: None,
             source,
+            input_epoch: 0,
+            load_id: 0,
             last_save_path: None,
             quit: false,
             config,
@@ -368,7 +398,10 @@ impl App {
     }
 
     fn needs_tick(&self) -> bool {
-        self.evaluating || self.toast.is_some() || !self.paths.is_complete()
+        self.evaluating
+            || self.loading.is_some()
+            || self.toast.is_some()
+            || !self.paths.is_complete()
     }
 
     fn on_tick(&mut self) {
@@ -492,9 +525,13 @@ impl App {
                 }
             }
             AppEvent::Values {
+                epoch,
                 source_query,
                 result,
             } => {
+                if epoch != self.input_epoch {
+                    return;
+                }
                 if self.values_in_flight.as_deref() == Some(source_query.as_str()) {
                     self.values_in_flight = None;
                 }
@@ -519,6 +556,31 @@ impl App {
             AppEvent::PathsProgress => {
                 if !self.is_previewing() && value_completion::parse(&self.editor.text()).is_none() {
                     self.refresh_suggestions();
+                }
+            }
+            AppEvent::Opened { id, path, result } => {
+                if id != self.load_id {
+                    return;
+                }
+                self.loading = None;
+                match result {
+                    Ok(loaded) => {
+                        let values = match loaded.input.len() {
+                            1 => "1 value".to_string(),
+                            n => format!("{n} values"),
+                        };
+                        let text = format!(
+                            "Opened {} ({}, {values})",
+                            path.display(),
+                            save::human_size(loaded.bytes)
+                        );
+                        self.replace_input(loaded, path);
+                        self.notify(text, Severity::Success);
+                    }
+                    Err(e) => self.notify(
+                        format!("Failed to open {}: {e}", path.display()),
+                        Severity::Error,
+                    ),
                 }
             }
             AppEvent::Saved { path, result } => match result {
@@ -553,9 +615,11 @@ impl App {
                 let (worker, tx) = (self.worker.clone(), self.tx.clone());
                 let limit = self.config.completion.max_value_suggestions;
                 let source_query = request.source_query;
+                let epoch = self.input_epoch;
                 tokio::spawn(async move {
                     let result = worker.scalar_values(source_query.clone(), limit).await;
                     let _ = tx.send(AppEvent::Values {
+                        epoch,
                         source_query,
                         result,
                     });
@@ -730,6 +794,8 @@ impl App {
             self.copy(MenuAction::Result);
         } else if global.save_result.matches(&key) {
             self.open_save_prompt();
+        } else if global.open_file.matches(&key) {
+            self.open_file_prompt();
         } else if global.focus_query.matches(&key) {
             self.set_focus(Panel::Query);
         } else if global.focus_suggestions.matches(&key) {
@@ -1103,7 +1169,106 @@ impl App {
         };
         match prompt.action {
             PromptAction::SaveResult => self.confirm_save(),
+            PromptAction::OpenFile => self.confirm_open(),
         }
+    }
+
+    // --- Opening ------------------------------------------------------------
+
+    /// Ask for a file to replace the input, starting in the directory of the current one.
+    fn open_file_prompt(&mut self) {
+        let dir = self
+            .source
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|dir| dir.display().to_string())
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| format!("{}/", dir.trim_end_matches('/')))
+            .unwrap_or_default();
+        self.popup = Some(Popup::Prompt(Prompt {
+            title: " Open a JSON file ",
+            action: PromptAction::OpenFile,
+            editor: LineEditor::new(&dir),
+            message: None,
+            overwrite: None,
+            completion: None,
+        }));
+    }
+
+    fn confirm_open(&mut self) {
+        let Some(Popup::Prompt(prompt)) = &mut self.popup else {
+            return;
+        };
+        let text = prompt.editor.text().trim().to_string();
+        if text.is_empty() {
+            prompt.message = Some(("Type the name of the file".into(), Severity::Warning));
+            return;
+        }
+        let path = save::resolve_path(&text);
+        if path.is_dir() {
+            prompt.message = Some(("This is a directory".into(), Severity::Error));
+            return;
+        }
+        if !path.is_file() {
+            prompt.message = Some(("No such file".into(), Severity::Error));
+            return;
+        }
+
+        self.popup = None;
+        self.load_id += 1;
+        self.loading = Some(path.clone());
+        let id = self.load_id;
+        let max_streams = self.config.json.max_streams;
+        let tx = self.tx.clone();
+        // Reading, parsing and laying out a large file takes a while: keep it off the UI.
+        tokio::task::spawn_blocking(move || {
+            let load = || -> anyhow::Result<Loaded> {
+                let text = std::fs::read_to_string(&path)?;
+                let input = Arc::new(json::deserialize(&text, max_streams)?);
+                let tree = JsonTree::new(input.clone());
+                Ok(Loaded {
+                    input,
+                    tree,
+                    bytes: text.len(),
+                })
+            };
+            let result = load();
+            let _ = tx.send(AppEvent::Opened { id, path, result });
+        });
+    }
+
+    /// Explore another input, keeping the query (evaluated again on it) and the history.
+    fn replace_input(&mut self, loaded: Loaded, source: PathBuf) {
+        let Loaded { input, tree, .. } = loaded;
+        // Stop the work left on the previous input: its evaluation, and the
+        // indexing of its paths (once its index is dropped).
+        self.worker.cancel();
+        self.worker = JqWorker::spawn(input.clone());
+        self.paths = index_paths(&input, &self.tx);
+        self.input = input;
+        self.input_epoch += 1;
+        self.source = Some(source);
+        // Saving now proposes a name next to the new file.
+        self.last_save_path = None;
+
+        self.generation += 1;
+        self.eval_deadline = None;
+        self.evaluating = false;
+        self.pending_history = None;
+        self.query_status = None;
+        self.empty_result = false;
+        self.drill_stack.clear();
+        self.input_tree = None;
+        self.values_in_flight = None;
+        self.suggestions = Suggestions::default();
+        self.result = ResultView {
+            tree,
+            query: ".".into(),
+        };
+        self.requested_query = ".".into();
+
+        self.refresh_suggestions();
+        self.evaluate_now();
     }
 
     fn confirm_save(&mut self) {
@@ -1356,6 +1521,16 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Index the paths of `input` in the background, for the Suggestions panel.
+fn index_paths(input: &Arc<Vec<Value>>, tx: &mpsc::UnboundedSender<AppEvent>) -> PathIndex {
+    let paths = PathIndex::default();
+    let tx = tx.clone();
+    paths.spawn_loader(input.clone(), PATH_LOAD_CHUNK, move || {
+        let _ = tx.send(AppEvent::PathsProgress);
+    });
+    paths
 }
 
 impl Prompt {
@@ -1738,6 +1913,125 @@ mod tests {
         assert_eq!(prompt(&app).message.as_ref().unwrap().1, Severity::Warning);
         type_text(&mut app, "x");
         assert!(prompt(&app).message.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Process background events until the file being opened is applied.
+    async fn until_opened(app: &mut App, rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
+        while app.loading.is_some() {
+            let event = rx.recv().await.unwrap();
+            app.handle_app_event(event);
+        }
+    }
+
+    /// Type `path` in the open prompt and confirm it.
+    fn open(app: &mut App, path: &std::path::Path) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(app, &path.display().to_string());
+        press(app, KeyCode::Enter);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lazyjq-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn opening_a_file_runs_the_query_on_it() {
+        let dir = temp_dir("open");
+        let file = dir.join("other.json");
+        std::fs::write(&file, r#"{"n":42,"users":[]}"#).unwrap();
+
+        let (mut app, mut rx) = app(SAMPLE).await;
+        app.result.tree.down(1);
+        app.drill_down();
+        settle(&mut app, &mut rx).await;
+        app.set_query(".n");
+        app.evaluate_now();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(**app.result.tree.values(), [serde_json::json!(1)]);
+
+        open(&mut app, &file);
+        assert!(app.popup.is_none());
+        assert!(app.loading.is_some());
+        until_opened(&mut app, &mut rx).await;
+        settle(&mut app, &mut rx).await;
+
+        assert_eq!(app.source.as_deref(), Some(file.as_path()));
+        assert_eq!(app.toast.as_ref().unwrap().severity, Severity::Success);
+        assert_eq!(app.result.query, ".n");
+        assert_eq!(**app.result.tree.values(), [serde_json::json!(42)]);
+        assert!(app.drill_stack.is_empty());
+
+        // Back to `.`: the new input, not the previous one.
+        app.set_query(".");
+        app.evaluate_now();
+        settle(&mut app, &mut rx).await;
+        assert_eq!(
+            **app.result.tree.values(),
+            [serde_json::json!({"n": 42, "users": []})]
+        );
+
+        // The next prompt starts in the directory of the file.
+        app.open_file_prompt();
+        assert_eq!(prompt(&app).editor.text(), format!("{}/", dir.display()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn opening_errors_keep_the_input() {
+        let dir = temp_dir("open-errors");
+        let (mut app, mut rx) = app(SAMPLE).await;
+
+        open(&mut app, &dir.join("missing.json"));
+        assert_eq!(prompt(&app).message.as_ref().unwrap().1, Severity::Error);
+        open(&mut app, &dir);
+        assert_eq!(prompt(&app).message.as_ref().unwrap().1, Severity::Error);
+
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{ not json").unwrap();
+        open(&mut app, &broken);
+        until_opened(&mut app, &mut rx).await;
+        assert_eq!(app.toast.as_ref().unwrap().severity, Severity::Error);
+        assert_eq!(app.source, None);
+        assert_eq!(app.result.tree.values().len(), 1);
+        assert!(app.result.tree.values()[0].get("users").is_some());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn results_for_the_previous_input_are_ignored() {
+        let dir = temp_dir("open-stale");
+        let file = dir.join("other.json");
+        std::fs::write(&file, r#"{"users":[{"name":"Zed"}]}"#).unwrap();
+
+        let (mut app, mut rx) = app(SAMPLE).await;
+        let query = ".users[] | select(.name == \"";
+        app.set_query(query);
+        let source_query = value_completion::parse(query).unwrap().source_query;
+
+        open(&mut app, &file);
+        until_opened(&mut app, &mut rx).await;
+        // Values computed for the previous input arrive late.
+        app.handle_app_event(AppEvent::Values {
+            epoch: 0,
+            source_query: source_query.clone(),
+            result: Ok(vec!["\"Al\"".into()]),
+        });
+        assert!(!app.suggestions.items.iter().any(|v| v.contains("Al")));
+
+        // The values of the new input are suggested.
+        while !app.suggestions.items.iter().any(|v| v.contains("Zed")) {
+            let event = rx.recv().await.unwrap();
+            app.handle_app_event(event);
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

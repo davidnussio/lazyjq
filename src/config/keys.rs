@@ -29,21 +29,25 @@ impl Keys {
     }
 
     fn parse(labels: Vec<String>) -> Result<Self, String> {
-        let mut bindings = Vec::with_capacity(labels.len());
-        for label in &labels {
-            // termcfg lowercases single letters (`G` would become `g`): take them literally.
-            let mut chars = label.chars();
-            if let (Some(ch), None) = (chars.next(), chars.next()) {
-                bindings.push(normalize(KeyCode::Char(ch), KeyModifiers::NONE));
-                continue;
-            }
-            let event: Event = parse_shortcut(label).map_err(|e| e.to_string())?.into();
-            match event {
-                Event::Key(key) => bindings.push(normalize(key.code, key.modifiers)),
-                _ => return Err(format!("`{label}` is not a key")),
-            }
-        }
+        let bindings = labels
+            .iter()
+            .map(|label| parse_label(label))
+            .collect::<Result<_, _>>()?;
         Ok(Self { bindings, labels })
+    }
+}
+
+/// The key a binding such as `Ctrl+O` or `G` stands for.
+pub fn parse_label(label: &str) -> Result<(KeyCode, KeyModifiers), String> {
+    // termcfg lowercases single letters (`G` would become `g`): take them literally.
+    let mut chars = label.chars();
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        return Ok(normalize(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let event: Event = parse_shortcut(label).map_err(|e| e.to_string())?.into();
+    match event {
+        Event::Key(key) => Ok(normalize(key.code, key.modifiers)),
+        _ => Err(format!("`{label}` is not a key")),
     }
 }
 

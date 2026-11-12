@@ -120,9 +120,11 @@ quit = ["q"]
 force_quit = ["Ctrl+C"]
 help = ["?", "F1"]
 copy_query = ["Ctrl+Q"]
-copy_result = ["Ctrl+O"]
+copy_result = ["Ctrl+Y"]
 # Save the result to a file (asks for the path)
 save_result = ["Ctrl+S"]
+# Open another JSON file in place of the input, keeping the query (asks for the path)
+open_file = ["Ctrl+O"]
 focus_query = ["1", "/", "i"]
 focus_suggestions = ["2"]
 focus_history = ["3"]
@@ -195,8 +197,8 @@ copy_menu = ["y"]
 # Go back to the query editor
 back = ["Esc", "Shift+Up"]
 
-# Popups (help, copy menu, file name prompt)
-# In the file name prompt, printable keys (like "q") are typed, the query
+# Popups (help, copy menu, file name prompts)
+# In the file name prompts, printable keys (like "q") are typed, the query
 # editor keys edit the text and `complete` completes the file name; while
 # going through the matches, the list keys move between them.
 [keybinds.popup]

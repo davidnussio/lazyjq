@@ -146,7 +146,7 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
             .alignment(Alignment::Left),
         );
     }
-    if app.evaluating {
+    if app.evaluating || app.loading.is_some() {
         block = block.title(
             Line::styled(format!(" {} ", spinner(app)), config.theme.dim)
                 .alignment(Alignment::Right),
@@ -368,10 +368,16 @@ fn draw_result(frame: &mut Frame, app: &mut App, area: Rect) {
     let config = app.config.clone();
     let tree = &app.result.tree;
     let count = tree.values().len();
-    let extra = match count {
-        1 => "· 1 value".to_string(),
-        n => format!("· {n} values"),
+    let values = match count {
+        1 => "1 value".to_string(),
+        n => format!("{n} values"),
     };
+    let file = match (&app.loading, &app.source) {
+        (Some(path), _) => format!("· opening {}… ", file_name(path)),
+        (None, Some(path)) => format!("· {} ", file_name(path)),
+        (None, None) => String::new(),
+    };
+    let extra = format!("{file}· {values}");
     let mut block = panel_block(
         app,
         Panel::Result,
@@ -435,6 +441,7 @@ fn hints(app: &App) -> Vec<(&Keys, &'static str)> {
             (&k.query.history_previous, "history"),
             (&k.query.leave, "result"),
             (&k.global.copy_query, "copy query"),
+            (&k.global.open_file, "open file"),
             (&k.global.help, "help"),
             (&k.global.force_quit, "quit"),
         ],
@@ -544,6 +551,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                 (&k.global.copy_query, "Copy the query"),
                 (&k.global.copy_result, "Copy the result"),
                 (&k.global.save_result, "Save the result to a file"),
+                (&k.global.open_file, "Open another file (the query is kept)"),
                 (&k.global.focus_query, "Focus the query editor"),
                 (&k.global.focus_suggestions, "Focus Suggestions"),
                 (&k.global.focus_history, "Focus History"),
@@ -617,14 +625,14 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             ],
         ),
         (
-            "Save prompt",
+            "File prompts (open / save)",
             vec![
                 (
                     &k.query.complete,
                     "Complete the file name (again: next match)",
                 ),
                 (&k.list.up, "Previous match"),
-                (&k.popup.select, "Save (on a match: keep it)"),
+                (&k.popup.select, "Open / save (on a match: keep it)"),
                 (&k.popup.close, "Cancel (on a match: undo it)"),
             ],
         ),
@@ -730,7 +738,8 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     let footer = if choosing {
         format!(" {complete}: next | {confirm}: choose | {close}: back ")
     } else {
-        format!(" {complete}: complete | {confirm}: save | {close}: cancel ")
+        let verb = prompt.action.verb();
+        format!(" {complete}: complete | {confirm}: {verb} | {close}: cancel ")
     };
     let block = popup_block(app, prompt.title, footer);
     let inner = block.inner(area);
@@ -823,6 +832,14 @@ fn candidates_line(
         used += widths[i] + GAP;
     }
     Line::from(spans)
+}
+
+/// The last component of `path`, as shown in titles.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Messages are shown on one line.

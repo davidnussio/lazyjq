@@ -34,8 +34,60 @@ impl Config {
     pub fn load_from(content: &str) -> anyhow::Result<Self> {
         let mut base: toml::Table = toml::from_str(DEFAULT_CONFIG)?;
         let user: toml::Table = toml::from_str(content)?;
+        let user_keybinds = user.get("keybinds").cloned();
         merge(&mut base, user);
+        if let Some(toml::Value::Table(user_keybinds)) = user_keybinds {
+            drop_shadowed_defaults(&mut base, &user_keybinds);
+        }
         Ok(toml::Value::Table(base).try_into()?)
+    }
+}
+
+/// In each keybinding section, the keys the user binds to an action are
+/// removed from the *default* bindings of the other actions, which would
+/// otherwise compete for them.
+///
+/// A configuration file written by an older version keeps the defaults of the
+/// time (e.g. `copy_result = ["Ctrl+O"]`): those keep working as written, and a
+/// newer default using the same key (`open_file = ["Ctrl+O"]`) gives way.
+fn drop_shadowed_defaults(base: &mut toml::Table, user_keybinds: &toml::Table) {
+    let Some(toml::Value::Table(sections)) = base.get_mut("keybinds") else {
+        return;
+    };
+    for (name, section) in sections.iter_mut() {
+        let (Some(toml::Value::Table(user_section)), toml::Value::Table(section)) =
+            (user_keybinds.get(name), section)
+        else {
+            continue;
+        };
+        let taken: Vec<_> = user_section
+            .values()
+            .flat_map(labels)
+            .filter_map(|label| keys::parse_label(&label).ok())
+            .collect();
+        for (action, value) in section.iter_mut() {
+            if user_section.contains_key(action) {
+                continue;
+            }
+            let kept: Vec<toml::Value> = labels(value)
+                .into_iter()
+                .filter(|label| keys::parse_label(label).map_or(true, |key| !taken.contains(&key)))
+                .map(toml::Value::String)
+                .collect();
+            *value = toml::Value::Array(kept);
+        }
+    }
+}
+
+/// The labels of a binding written as `"Ctrl+O"` or `["Ctrl+O", "o"]`.
+fn labels(value: &toml::Value) -> Vec<String> {
+    match value {
+        toml::Value::String(label) => vec![label.clone()],
+        toml::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -174,6 +226,7 @@ pub struct GlobalKeybinds {
     pub copy_query: Keys,
     pub copy_result: Keys,
     pub save_result: Keys,
+    pub open_file: Keys,
     pub focus_query: Keys,
     pub focus_suggestions: Keys,
     pub focus_history: Keys,
@@ -268,6 +321,41 @@ mod tests {
         assert_eq!(config.json.max_streams, None);
         assert_eq!(config.keybinds.global.quit.display(), Some("Ctrl+X"));
         assert!(config.keybinds.global.force_quit.display().is_some());
+    }
+
+    #[test]
+    fn user_bindings_win_over_other_defaults() {
+        // As written by version 0.3.0, where Ctrl+O copied the result.
+        let config = Config::load_from(
+            r#"
+            [keybinds.global]
+            copy_result = ["Ctrl+O"]
+            "#,
+        )
+        .unwrap();
+        let global = &config.keybinds.global;
+        let ctrl_o = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert!(global.copy_result.matches(&ctrl_o));
+        assert!(!global.open_file.matches(&ctrl_o));
+        assert_eq!(global.open_file.display(), None);
+
+        // Both set by the user: kept as written.
+        let config = Config::load_from(
+            r#"
+            [keybinds.global]
+            copy_result = "ctrl+o"
+            open_file = ["Ctrl+O", "Ctrl+P"]
+            "#,
+        )
+        .unwrap();
+        assert!(config.keybinds.global.open_file.matches(&ctrl_o));
+
+        // Without bindings of the user, the defaults apply.
+        let config = Config::load_from("").unwrap();
+        assert!(config.keybinds.global.open_file.matches(&ctrl_o));
     }
 
     #[test]
