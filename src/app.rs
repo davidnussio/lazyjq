@@ -4,7 +4,7 @@
 //! work (jq evaluation, value suggestions, path indexing) and timers update
 //! the state, then the whole screen is drawn again.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use arboard::Clipboard;
 use crossterm::event::{
@@ -24,11 +24,12 @@ use tokio::{
 
 use crate::{
     builtins,
-    config::{keys::is_text_input, Config},
+    config::{keys::is_text_input, Config, QueryKeybinds},
     editor::LineEditor,
     history::History,
     jq_worker::JqWorker,
-    json_tree::{path_to_filter, pretty, JsonTree},
+    json_tree::{formatted_values, path_to_filter, pretty, JsonTree},
+    save,
     suggestions::{PathIndex, Suggestions},
     ui, value_completion,
 };
@@ -39,6 +40,8 @@ const PATH_LOAD_CHUNK: usize = 50_000;
 const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// Lines moved per mouse wheel step.
 const SCROLL_STEP: usize = 3;
+/// Word boundaries when editing a file name.
+const PATH_BREAKS: [char; 5] = ['/', '.', '-', '_', ' '];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
@@ -89,6 +92,7 @@ pub enum MenuAction {
     Value,
     Result,
     Query,
+    Save,
 }
 
 pub struct MenuItem {
@@ -103,9 +107,28 @@ pub struct Menu {
     pub selected: usize,
 }
 
+/// What confirming a [`Prompt`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptAction {
+    SaveResult,
+}
+
+/// A popup asking for one line of text, e.g. a file name.
+pub struct Prompt {
+    pub title: &'static str,
+    pub action: PromptAction,
+    pub editor: LineEditor,
+    /// Why the text was not accepted (shown under it until it is edited).
+    pub message: Option<(String, Severity)>,
+    /// Text whose confirmation would overwrite an existing file: confirming
+    /// the same text again does it.
+    overwrite: Option<String>,
+}
+
 pub enum Popup {
     Help { scroll: usize },
     Menu(Menu),
+    Prompt(Prompt),
 }
 
 /// What the Result panel shows.
@@ -154,6 +177,11 @@ pub enum AppEvent {
         result: anyhow::Result<Vec<String>>,
     },
     PathsProgress,
+    Saved {
+        path: PathBuf,
+        /// Number of bytes written.
+        result: std::io::Result<usize>,
+    },
 }
 
 /// Screen areas from the last draw, used for mouse handling and paging.
@@ -202,6 +230,10 @@ pub struct App {
     /// going back to `.` is instant and keeps folds and cursor.
     input_tree: Option<JsonTree>,
     values_in_flight: Option<String>,
+    /// The input file, `None` for stdin.
+    source: Option<PathBuf>,
+    /// File name last confirmed in the save prompt, proposed again next time.
+    last_save_path: Option<String>,
     quit: bool,
 }
 
@@ -215,6 +247,7 @@ impl App {
         config: Config,
         input: Arc<Vec<Value>>,
         default_filter: Option<String>,
+        source: Option<PathBuf>,
         tx: mpsc::UnboundedSender<AppEvent>,
     ) -> Self {
         let config = Arc::new(config);
@@ -260,6 +293,8 @@ impl App {
             pending_history: None,
             input_tree: None,
             values_in_flight: None,
+            source,
+            last_save_path: None,
             quit: false,
             config,
         };
@@ -473,6 +508,16 @@ impl App {
                     self.refresh_suggestions();
                 }
             }
+            AppEvent::Saved { path, result } => match result {
+                Ok(bytes) => self.notify(
+                    format!("Saved {} to {}", save::human_size(bytes), path.display()),
+                    Severity::Success,
+                ),
+                Err(e) => self.notify(
+                    format!("Failed to save {}: {e}", path.display()),
+                    Severity::Error,
+                ),
+            },
         }
     }
 
@@ -612,11 +657,19 @@ impl App {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Paste(text) if self.focus == Panel::Query && self.popup.is_none() => {
-                for ch in text.chars().filter(|c| !c.is_control()) {
-                    self.editor.insert(ch);
+            Event::Paste(text) => {
+                let chars = text.chars().filter(|c| !c.is_control());
+                match &mut self.popup {
+                    Some(Popup::Prompt(prompt)) => {
+                        chars.for_each(|ch| prompt.editor.insert(ch));
+                        prompt.edited();
+                    }
+                    None if self.focus == Panel::Query => {
+                        chars.for_each(|ch| self.editor.insert(ch));
+                        self.on_text_changed();
+                    }
+                    _ => {}
                 }
-                self.on_text_changed();
             }
             _ => {}
         }
@@ -662,6 +715,8 @@ impl App {
             self.copy(MenuAction::Query);
         } else if global.copy_result.matches(&key) {
             self.copy(MenuAction::Result);
+        } else if global.save_result.matches(&key) {
+            self.open_save_prompt();
         } else if global.focus_query.matches(&key) {
             self.set_focus(Panel::Query);
         } else if global.focus_suggestions.matches(&key) {
@@ -712,31 +767,7 @@ impl App {
                 self.schedule_evaluation();
             }
             return true;
-        } else if k.backward.matches(key) {
-            self.editor.backward();
-        } else if k.forward.matches(key) {
-            self.editor.forward();
-        } else if k.move_to_head.matches(key) {
-            self.editor.move_to_head();
-        } else if k.move_to_tail.matches(key) {
-            self.editor.move_to_tail();
-        } else if k.move_to_previous_word.matches(key) {
-            self.editor.move_to_previous_word(breaks);
-        } else if k.move_to_next_word.matches(key) {
-            self.editor.move_to_next_word(breaks);
-        } else if k.erase.matches(key) {
-            self.editor.erase();
-        } else if k.erase_forward.matches(key) {
-            self.editor.erase_forward();
-        } else if k.erase_all.matches(key) {
-            self.editor.erase_all();
-        } else if k.erase_to_previous_word.matches(key) {
-            self.editor.erase_to_previous_word(breaks);
-        } else if k.erase_to_next_word.matches(key) {
-            self.editor.erase_to_next_word(breaks);
-        } else if k.erase_to_tail.matches(key) {
-            self.editor.erase_to_tail();
-        } else {
+        } else if !edit_line(&mut self.editor, k, key, breaks) {
             return false;
         }
         if self.editor.text() != before {
@@ -998,8 +1029,13 @@ impl App {
             label: format!("Copy the query: {}", self.result.query),
             action: MenuAction::Query,
         });
+        items.push(MenuItem {
+            key: 's',
+            label: "Save the result to a file…".into(),
+            action: MenuAction::Save,
+        });
         self.popup = Some(Popup::Menu(Menu {
-            title: " Copy to clipboard ",
+            title: " Copy or save ",
             items,
             selected: 0,
         }));
@@ -1016,6 +1052,10 @@ impl App {
                 .cursor_path()
                 .map(|(_, path)| path_to_filter(&path)),
             MenuAction::Value => self.result.tree.cursor_value().map(|v| pretty(v, indent)),
+            MenuAction::Save => {
+                self.open_save_prompt();
+                return;
+            }
         };
         let Some(text) = text else {
             return;
@@ -1026,7 +1066,117 @@ impl App {
         }
     }
 
+    // --- Saving ------------------------------------------------------------
+
+    /// Ask for the file to save the result to.
+    fn open_save_prompt(&mut self) {
+        let path = self
+            .last_save_path
+            .clone()
+            .unwrap_or_else(|| save::default_path(self.source.as_deref()));
+        self.popup = Some(Popup::Prompt(Prompt {
+            title: " Save the result to ",
+            action: PromptAction::SaveResult,
+            editor: LineEditor::new(&path),
+            message: None,
+            overwrite: None,
+        }));
+    }
+
+    fn confirm_prompt(&mut self) {
+        let Some(Popup::Prompt(prompt)) = &mut self.popup else {
+            return;
+        };
+        match prompt.action {
+            PromptAction::SaveResult => self.confirm_save(),
+        }
+    }
+
+    fn confirm_save(&mut self) {
+        let confirm = self
+            .config
+            .keybinds
+            .popup
+            .select
+            .display()
+            .unwrap_or("Enter")
+            .to_string();
+        let Some(Popup::Prompt(prompt)) = &mut self.popup else {
+            return;
+        };
+        let text = prompt.editor.text().trim().to_string();
+        if text.is_empty() {
+            prompt.message = Some(("Type the name of the file".into(), Severity::Warning));
+            return;
+        }
+        let path = save::resolve_path(&text);
+        if path.is_dir() {
+            prompt.message = Some(("This is a directory".into(), Severity::Error));
+            return;
+        }
+        if path.exists() && prompt.overwrite.as_deref() != Some(text.as_str()) {
+            prompt.message = Some((
+                format!("The file exists: {confirm} again to overwrite it"),
+                Severity::Warning,
+            ));
+            prompt.overwrite = Some(text);
+            return;
+        }
+
+        self.popup = None;
+        self.last_save_path = Some(text);
+        let values = self.result.tree.values().clone();
+        let indent = self.config.json.indent;
+        let tx = self.tx.clone();
+        // Formatting and writing a large result takes a while: keep it off the UI.
+        tokio::task::spawn_blocking(move || {
+            let mut text = formatted_values(&values, indent);
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let result = save::write_atomic(&path, text.as_bytes()).map(|()| text.len());
+            let _ = tx.send(AppEvent::Saved { path, result });
+        });
+    }
+
+    fn handle_prompt_key(&mut self, key: &KeyEvent) {
+        let config = self.config.clone();
+        let k = &config.keybinds.popup;
+        // Printable keys are typed, whatever they are bound to.
+        let typing = is_text_input(key.code, key.modifiers);
+        if k.close.matches(key) && !typing {
+            self.popup = None;
+            return;
+        }
+        if k.select.matches(key) && !typing {
+            self.confirm_prompt();
+            return;
+        }
+        let Some(Popup::Prompt(prompt)) = &mut self.popup else {
+            return;
+        };
+        let before = prompt.editor.text();
+        if !edit_line(
+            &mut prompt.editor,
+            &config.keybinds.query,
+            key,
+            &PATH_BREAKS,
+        ) && typing
+        {
+            if let crossterm::event::KeyCode::Char(ch) = key.code {
+                prompt.editor.insert(ch);
+            }
+        }
+        if prompt.editor.text() != before {
+            prompt.edited();
+        }
+    }
+
     fn handle_popup_key(&mut self, key: &KeyEvent) {
+        if matches!(self.popup, Some(Popup::Prompt(_))) {
+            self.handle_prompt_key(key);
+            return;
+        }
         let config = self.config.clone();
         let k = &config.keybinds.popup;
         let Some(popup) = &mut self.popup else {
@@ -1045,6 +1195,7 @@ impl App {
                     *scroll += 1;
                 }
             }
+            Popup::Prompt(_) => {}
             Popup::Menu(menu) => {
                 let chosen = if k.up.matches(key) {
                     menu.selected = menu.selected.saturating_sub(1);
@@ -1160,6 +1311,47 @@ impl App {
     }
 }
 
+impl Prompt {
+    /// The text changed: what was said about the previous one no longer applies.
+    fn edited(&mut self) {
+        self.message = None;
+        self.overwrite = None;
+    }
+}
+
+/// Apply an editing key (cursor moves and deletions) to a line editor.
+/// Returns whether `key` is one of them.
+fn edit_line(editor: &mut LineEditor, k: &QueryKeybinds, key: &KeyEvent, breaks: &[char]) -> bool {
+    if k.backward.matches(key) {
+        editor.backward();
+    } else if k.forward.matches(key) {
+        editor.forward();
+    } else if k.move_to_head.matches(key) {
+        editor.move_to_head();
+    } else if k.move_to_tail.matches(key) {
+        editor.move_to_tail();
+    } else if k.move_to_previous_word.matches(key) {
+        editor.move_to_previous_word(breaks);
+    } else if k.move_to_next_word.matches(key) {
+        editor.move_to_next_word(breaks);
+    } else if k.erase.matches(key) {
+        editor.erase();
+    } else if k.erase_forward.matches(key) {
+        editor.erase_forward();
+    } else if k.erase_all.matches(key) {
+        editor.erase_all();
+    } else if k.erase_to_previous_word.matches(key) {
+        editor.erase_to_previous_word(breaks);
+    } else if k.erase_to_next_word.matches(key) {
+        editor.erase_to_next_word(breaks);
+    } else if k.erase_to_tail.matches(key) {
+        editor.erase_to_tail();
+    } else {
+        return false;
+    }
+    true
+}
+
 /// Evaluate the query and build the resulting tree.
 /// Returns `None` when the query was superseded by a newer one.
 async fn evaluate(input: Arc<Vec<Value>>, worker: JqWorker, query: &str) -> Option<Outcome> {
@@ -1192,7 +1384,7 @@ mod tests {
         let config = Config::load_from("[history]\npersist = false").unwrap();
         let input = Arc::new(crate::json::deserialize(json, None).unwrap());
         let (tx, rx) = mpsc::unbounded_channel();
-        (App::new(config, input, None, tx), rx)
+        (App::new(config, input, None, None, tx), rx)
     }
 
     /// Process background events until the pending evaluation is applied.
@@ -1284,6 +1476,98 @@ mod tests {
         app.set_query(".nope");
         assert_eq!(app.suggestions.kind, SuggestionKind::Paths);
         assert!(!app.showing_docs());
+    }
+
+    fn press(app: &mut App, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyModifiers;
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            press(app, crossterm::event::KeyCode::Char(ch));
+        }
+    }
+
+    /// Process background events until the save is reported.
+    async fn until_saved(app: &mut App, rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
+        loop {
+            let event = rx.recv().await.unwrap();
+            let saved = matches!(event, AppEvent::Saved { .. });
+            app.handle_app_event(event);
+            if saved {
+                return;
+            }
+        }
+    }
+
+    fn prompt(app: &App) -> &Prompt {
+        match &app.popup {
+            Some(Popup::Prompt(prompt)) => prompt,
+            _ => panic!("no prompt open"),
+        }
+    }
+
+    #[tokio::test]
+    async fn saves_the_result_to_a_file() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let dir = std::env::temp_dir().join(format!("lazyjq-app-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("out.json");
+        std::fs::write(&file, "old").unwrap();
+
+        let (mut app, mut rx) = app(r#"{"a":1} {"a":2}"#).await;
+        app.set_query(".a");
+        app.evaluate_now();
+        settle(&mut app, &mut rx).await;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(prompt(&app).editor.text(), "result.json");
+
+        // Printable keys bound to popup actions (`q` closes) are typed.
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(&mut app, "q");
+        assert_eq!(prompt(&app).editor.text(), "q");
+        press(&mut app, KeyCode::Backspace);
+        type_text(&mut app, &file.display().to_string());
+
+        // An existing file is only overwritten when confirmed twice.
+        press(&mut app, KeyCode::Enter);
+        assert!(prompt(&app).message.is_some());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.popup.is_none());
+
+        until_saved(&mut app, &mut rx).await;
+        assert_eq!(app.toast.as_ref().unwrap().severity, Severity::Success);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "1\n2\n");
+
+        // The path is proposed again, and Esc cancels.
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(prompt(&app).editor.text(), file.display().to_string());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.popup.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn save_errors_are_reported() {
+        let (mut app, mut rx) = app(SAMPLE).await;
+        app.open_save_prompt();
+        app.handle_key(KeyEvent::new(
+            crossterm::event::KeyCode::Char('u'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert_eq!(prompt(&app).message.as_ref().unwrap().1, Severity::Warning);
+
+        type_text(&mut app, "/nonexistent-lazyjq-dir/out.json");
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        until_saved(&mut app, &mut rx).await;
+        assert_eq!(app.toast.as_ref().unwrap().severity, Severity::Error);
     }
 
     #[tokio::test]

@@ -430,11 +430,7 @@ impl JsonTree {
 
     /// The whole stream, pretty printed (one value after the other).
     pub fn formatted(&self, indent: usize) -> String {
-        self.values
-            .iter()
-            .map(|value| pretty(value, indent))
-            .collect::<Vec<_>>()
-            .join("\n")
+        formatted_values(&self.values, indent)
     }
 }
 
@@ -525,6 +521,15 @@ fn push_rows(rows: &mut Vec<Row>, value: &Value, depth: u32, parent: u32, key: K
 
 fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
+}
+
+/// A stream of values pretty printed one after the other.
+pub fn formatted_values(values: &[Value], indent: usize) -> String {
+    values
+        .iter()
+        .map(|value| pretty(value, indent))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Pretty print `value` with the given indentation width.

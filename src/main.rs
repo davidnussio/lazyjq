@@ -23,6 +23,7 @@ mod history;
 mod jq_worker;
 mod json;
 mod json_tree;
+mod save;
 mod stdout_redirect;
 use stdout_redirect::StdoutRedirect;
 mod suggestions;
@@ -149,7 +150,11 @@ async fn main() -> anyhow::Result<()> {
     let mut stdout_redirect = StdoutRedirect::try_new_for_tui(args.write_to_stdout)?;
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let app = App::new(config, input, args.default_filter, tx);
+    let source = args
+        .input
+        .clone()
+        .filter(|path| path != &PathBuf::from("-"));
+    let app = App::new(config, input, args.default_filter, source, tx);
 
     let app = {
         let mut terminal = ratatui::init();

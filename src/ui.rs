@@ -72,6 +72,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match &app.popup {
         Some(Popup::Help { .. }) => draw_help(frame, app),
         Some(Popup::Menu(_)) => draw_menu(frame, app),
+        Some(Popup::Prompt(_)) => draw_prompt(frame, app),
         None => {}
     }
 }
@@ -465,6 +466,7 @@ fn hints(app: &App) -> Vec<(&Keys, &'static str)> {
             (&k.result.drill_down, "drill down"),
             (&k.result.drill_up, "back"),
             (&k.result.copy_menu, "copy"),
+            (&k.global.save_result, "save"),
             (&k.result.expand_all, "expand all"),
             (&k.result.collapse_all, "collapse all"),
             (&k.global.focus_query, "query"),
@@ -541,6 +543,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                 (&k.global.help, "Show this help"),
                 (&k.global.copy_query, "Copy the query"),
                 (&k.global.copy_result, "Copy the result"),
+                (&k.global.save_result, "Save the result to a file"),
                 (&k.global.focus_query, "Focus the query editor"),
                 (&k.global.focus_suggestions, "Focus Suggestions"),
                 (&k.global.focus_history, "Focus History"),
@@ -609,7 +612,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
                     &k.result.drill_up,
                     "Back to the result before the last drill down",
                 ),
-                (&k.result.copy_menu, "Copy menu"),
+                (&k.result.copy_menu, "Copy or save menu"),
                 (&k.result.back, "Back to the query"),
             ],
         ),
@@ -696,6 +699,54 @@ fn draw_menu(frame: &mut Frame, app: &App) {
     );
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_prompt(frame: &mut Frame, app: &App) {
+    let Some(Popup::Prompt(prompt)) = &app.popup else {
+        return;
+    };
+    let config = &app.config;
+    let area = centered(frame.area(), 72, 4);
+    let confirm = config.keybinds.popup.select.display().unwrap_or("enter");
+    let close = config.keybinds.popup.close.display().unwrap_or("esc");
+    let block = popup_block(
+        app,
+        prompt.title,
+        format!(
+            " {}: save | {}: cancel ",
+            confirm.to_lowercase(),
+            close.to_lowercase()
+        ),
+    );
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let prompt_width = config.editor.prompt.width();
+    let text_width = usize::from(inner.width).saturating_sub(prompt_width);
+    let (visible, cursor) = prompt.editor.viewport(text_width);
+    let message = match &prompt.message {
+        Some((text, severity)) => {
+            Line::styled(single_line(text), severity_style(config, *severity))
+        }
+        None => Line::styled(
+            format!("Result of {}", single_line(&app.result.query)),
+            config.theme.dim,
+        ),
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(config.editor.prompt.clone(), config.editor.prompt_style),
+            Span::raw(visible),
+        ]),
+        message,
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    if inner.width > 0 {
+        let x = inner.x + (prompt_width + cursor).min(usize::from(inner.width) - 1) as u16;
+        frame.set_cursor_position((x, inner.y));
+    }
 }
 
 /// Messages are shown on one line.

@@ -173,6 +173,7 @@ pub struct GlobalKeybinds {
     pub help: Keys,
     pub copy_query: Keys,
     pub copy_result: Keys,
+    pub save_result: Keys,
     pub focus_query: Keys,
     pub focus_suggestions: Keys,
     pub focus_history: Keys,

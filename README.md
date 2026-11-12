@@ -94,6 +94,7 @@ The whole flow, from `| ma` to the result:
 - Fast on large inputs: the input is converted for jq once, evaluations run on
   a dedicated thread and are cancelled when superseded.
 - Input from a file or stdin, one or more JSON values (e.g. [JSON Lines](https://jsonlines.org/)).
+- Save the result to a file without leaving the UI (<kbd>Ctrl + S</kbd>).
 - Configurable layout, colors and keybindings (TOML).
 
 ## Installation
@@ -191,6 +192,12 @@ typing in the query editor.
 | <kbd>←</kbd>, <kbd>→</kbd> | Previous / next panel |
 | <kbd>Ctrl + Q</kbd> | Copy the query |
 | <kbd>Ctrl + O</kbd> | Copy the result |
+| <kbd>Ctrl + S</kbd> | Save the result to a file |
+
+Saving asks for the file name. The first time it proposes
+`<input>.result.json` next to the input file (`result.json` when reading stdin),
+then the last file used. An existing file is only overwritten after a second
+<kbd>Enter</kbd>, and the result is written as with `--write-to-stdout`.
 
 ### [1] Query
 
@@ -230,7 +237,7 @@ While panel 3 shows the documentation of a function, the move keys scroll it.
 | <kbd>e</kbd>, <kbd>c</kbd> | Unfold / fold everything |
 | <kbd>f</kbd> | Narrow the query down to the selected node |
 | <kbd>Backspace</kbd>, <kbd>u</kbd> | Back to the result before the last <kbd>f</kbd>, with cursor and folds as you left them |
-| <kbd>y</kbd> | Copy menu: path or value of the selected node, result, query |
+| <kbd>y</kbd> | Copy menu: path or value of the selected node, result, query; or save the result to a file |
 | <kbd>Esc</kbd> | Back to the query |
 
 ## Configuration
