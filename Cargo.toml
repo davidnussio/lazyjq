@@ -1,6 +1,6 @@
 [package]
 name = "lazyjq"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["David Nussio", "ynqa <un.pensiero.vano@gmail.com>"]
 edition = "2021"
 description = "A lazygit-style terminal UI to explore JSON with jq"
